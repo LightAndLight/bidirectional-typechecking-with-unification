@@ -2,8 +2,13 @@
 {-# options_ghc -Wall -Werror #-}
 module Main where
 
+import Prelude hiding (fst, snd)
+import Data.List as List
 import Control.Monad
+import Data.Foldable
 import Data.Word
+import Data.Bifunctor
+import Data.Bitraversable
 
 data Ty
   = TVar Name
@@ -24,15 +29,15 @@ data Ty
   | TBool
   deriving (Eq, Show)
 
-subst :: (Name, Ty) -> Ty -> Ty
-subst arg@(name, newTy) ty =
+substTy :: (Name, Ty) -> Ty -> Ty
+substTy arg@(name, newTy) ty =
   case ty of
     TVar name' -> if name == name' then newTy else ty
     TUnknown _ -> ty
-    TArrow a b -> TArrow (subst arg a) (subst arg b)
-    TForall name' t -> TForall name' (subst arg t)
-    TExists name' t -> TExists name' (subst arg t)
-    TPair a b -> TPair (subst arg a) (subst arg b)
+    TArrow a b -> TArrow (substTy arg a) (substTy arg b)
+    TForall name' t -> TForall name' (substTy arg t)
+    TExists name' t -> TExists name' (substTy arg t)
+    TPair a b -> TPair (substTy arg a) (substTy arg b)
     TU8 -> ty
     TU16 -> ty
     TU32 -> ty
@@ -68,6 +73,21 @@ occursIn meta ty =
     TU32 -> False
     TU64 -> False
     TBool -> False
+
+allMetas :: Ty -> [Int]
+allMetas ty =
+  case ty of
+    TVar _ -> []
+    TUnknown meta -> [meta]
+    TArrow a b -> allMetas a `List.union` allMetas b
+    TForall _ t -> allMetas t
+    TExists _ t -> allMetas t
+    TPair a b -> allMetas a `List.union` allMetas b
+    TU8 -> []
+    TU16 -> []
+    TU32 -> []
+    TU64 -> []
+    TBool -> []
 
 data Name
   = Name String
@@ -106,6 +126,87 @@ data Expr
   | Bool Bool
   deriving (Eq, Show)
 
+substExpr :: (Name, Expr) -> Expr -> Expr
+substExpr arg@(name, newExpr) expr =
+  case expr of
+    Var name' ->
+      if name == name' then newExpr else expr
+    Ann e t -> Ann (substExpr arg e) t
+    Lam x ty e ->
+      if name == x then Lam x ty e else Lam x ty (substExpr arg e)
+    App f x -> App (substExpr arg f) (substExpr arg x)
+    LamTy x e -> LamTy x (substExpr arg e)
+    AppTy e t -> AppTy (substExpr arg e) t
+    Pack x t e -> Pack x t (substExpr arg e)
+    Unpack (tyName, valueName, value) rest ->
+      Unpack 
+        (tyName, valueName, substExpr arg value) 
+        (if name == valueName then rest else substExpr arg rest)
+    U8 _ -> expr
+    U16 _ -> expr
+    U32 _ -> expr
+    U64 _ -> expr
+    Pair a b -> Pair (substExpr arg a) (substExpr arg b)
+    Fst a -> Fst (substExpr arg a)
+    Snd a -> Snd (substExpr arg a)
+    Bool _ -> expr
+
+app :: Expr -> Expr -> Expr
+app (Lam name _ body) x = substExpr (name, x) body
+app f x = App f x
+
+lam :: Name -> Maybe Ty -> Expr -> Expr
+lam name _ (App f (Var name')) | name == name' = f
+lam name ty body = Lam name ty body
+
+lamTy :: Name -> Expr -> Expr
+lamTy name (AppTy f (TVar name')) | name == name' = f
+lamTy name body = LamTy name body
+
+fst :: Expr -> Expr
+fst (Pair a _) = a
+fst a = Fst a
+
+snd :: Expr -> Expr
+snd (Pair _ b) = b
+snd b = Snd b
+
+pair :: Expr -> Expr -> Expr
+pair (Fst a) (Snd a') | a == a' = a
+pair a b = Pair a b
+
+substTyExpr :: (Name, Ty) -> Expr -> Expr
+substTyExpr arg@(name, _) expr =
+  case expr of
+    Var _ -> expr
+    Ann e t -> Ann (substTyExpr arg e) (substTy arg t)
+    Lam x ty e -> Lam x (substTy arg <$> ty) (substTyExpr arg e)
+    App f x -> App (substTyExpr arg f) (substTyExpr arg x)
+    LamTy x e ->
+      if name == x then LamTy x e else LamTy x (substTyExpr arg e)
+    AppTy e t -> AppTy (substTyExpr arg e) (substTy arg t)
+    Pack x t e ->
+      Pack 
+        x 
+        (substTy arg t) 
+        (if name == x then e else substTyExpr arg e)
+    Unpack (tyName, valueName, value) rest ->
+      Unpack 
+        (tyName, valueName, substTyExpr arg value) 
+        (if name == tyName then rest else substTyExpr arg rest)
+    U8 _ -> expr
+    U16 _ -> expr
+    U32 _ -> expr
+    U64 _ -> expr
+    Pair a b -> Pair (substTyExpr arg a) (substTyExpr arg b)
+    Fst a -> Fst (substTyExpr arg a)
+    Snd a -> Snd (substTyExpr arg a)
+    Bool _ -> expr
+
+appTy :: Expr -> Ty -> Expr
+appTy (LamTy name body) t = substTyExpr (name, t) body
+appTy e t = AppTy e t
+
 data Error
   = NotInScope Name
   | NotASubtypeOf Ty Ty
@@ -119,7 +220,9 @@ newtype TC a = TC (State -> Either Error (State, a))
   deriving Functor
 
 runTC :: TC a -> Either Error a
-runTC (TC m) = snd <$> m (State 0 0 [])
+runTC (TC m) = do
+  (_, a) <- m (State 0 0 [])
+  pure a
 
 instance Applicative TC where
   pure a = TC $ \n -> pure (n, a)
@@ -246,7 +349,18 @@ infer ctx expr =
       ty <- unknown
       v' <- check ctx v (TExists name ty)
       (rest', restTy) <- infer ((varName, ty) : ctx) rest
-      when (hasVar tyName restTy) . typeError $ EscapedTyVar tyName
+      escaped <- 
+        foldlM 
+          (\acc (_, varTy) -> do
+            if acc
+            then pure True
+            else do
+              varTy' <- zonkTy varTy
+              pure $ hasVar tyName varTy'
+          ) 
+          False 
+          ctx
+      when (escaped || hasVar tyName restTy) . typeError $ EscapedTyVar tyName
       pure (Unpack (tyName, varName, v') rest', restTy)
 
     U8 _ -> pure (expr, TU8)
@@ -279,46 +393,54 @@ walk ty@(TUnknown u) = do
     Just ty' -> walk ty'
 walk ty = pure ty
 
-subtypeOf :: (Expr, Ty) -> Ty -> TC Expr
-subtypeOf (expr, a) b = do
+subtypeOf :: [(Name, Ty)] -> (Expr, Ty) -> Ty -> TC Expr
+subtypeOf ctx (expr, a) b = do
   a' <- walk a
   b' <- walk b
-  subtypeOf' (expr, a') b'
+  subtypeOf' ctx (expr, a') b'
 
 -- | @a `subtypeOf` b@ means that values of type @a@
 -- can be used when values of type @b@ are required.
-subtypeOf' :: (Expr, Ty) -> Ty -> TC Expr
-
-subtypeOf' (expr, TForall x t) (TForall x' t') =
-  error "two foralls" expr x t x' t'
-subtypeOf' (expr, a) (TForall x t) = do
+subtypeOf' :: [(Name, Ty)] -> (Expr, Ty) -> Ty -> TC Expr
+-- infer generalisation for lambda abstractions
+subtypeOf' ctx (expr@Lam{}, a) (TForall x t) = do
   -- When is an arbitrary @a@ a subtype of @forall x. t@?
   --
   -- When @a@ is a subtype of @t@ (generalisation)
-  LamTy x <$> subtypeOf (expr, a) t
-subtypeOf' (expr, TForall x t) b = do
+  --
+  -- All the metas that contain `x` as in their solution
+  -- must occur exclusively in `a`.
+  --
+  -- In other words, throw an error if there are metas
+  -- not reachable from `a` that contain `x` in their solution.
+  a' <- subtypeOf ctx (expr, a) t
+  escaped <- 
+    foldlM 
+      (\acc (_, varTy) -> do
+        if acc
+        then pure True
+        else hasVar x <$> zonkTy varTy
+      ) 
+      False 
+      ctx
+  when escaped . typeError $ EscapedTyVar x
+  pure $ lamTy x a'
+subtypeOf' ctx (expr, TForall x t) b = do
   -- When is @forall x. t@ a subtype of some arbitrary @b@?
   --
   -- When @t[x := ?]@ is a subtype of @b@ (instantiation)
   ty <- unknown
-  subtypeOf (AppTy expr ty, subst (x, ty) t) b
+  subtypeOf ctx (expr `appTy` ty, substTy (x, ty) t) b
 
-subtypeOf' (expr, TExists x t) (TExists x' t') = do
-  error "two exists" expr x t x' t'
-subtypeOf' (expr, TExists x t) b = do
-  -- When is @exists x. t@ a subtype of an arbitrary @b@?
-  exprName <- freshName
-  expr' <- subtypeOf (Var exprName, t) b
-  pure $ Unpack (x, exprName, expr) expr'
-subtypeOf' (expr, a) (TExists x t) = do
+subtypeOf' ctx (expr, a) (TExists x t) = do
   -- When is an arbitrary @a@ a subtype of @exists x. t@?
   --
-  -- When @a@ is a subtype of @t[x := ?]@
+  -- When @a@ is a subtype of @t[x := ?]@ (dual of instantiation)
   ty <- unknown
-  expr' <- subtypeOf (expr, a) (subst (x, ty) t)
+  expr' <- subtypeOf ctx (expr, a) (substTy (x, ty) t)
   pure $ Pack x ty expr'
 
-subtypeOf' (expr, a) b =
+subtypeOf' ctx (expr, a) b =
   case a of
     TVar v ->
       case b of
@@ -337,40 +459,40 @@ subtypeOf' (expr, a) b =
       case b of
         TArrow x' y' -> do
           name <- freshName
-          xExpr <- subtypeOf (Var name, x') x
-          yExpr <- subtypeOf (App expr xExpr, y) y'
-          pure $ Lam name (Just x) yExpr
+          xExpr <- subtypeOf ctx (Var name, x') x
+          yExpr <- subtypeOf ctx (expr `app` xExpr, y) y'
+          pure $ lam name (Just x) yExpr
         TUnknown u -> expr <$ solve u a
         _ -> typeError $ NotASubtypeOf a b
-    TForall x t -> error "covered" x t
-    TExists x t -> error "covered" x t
+    TForall x t -> error "forall" x t
+    TExists x t -> error "exists" x t
     TPair x y ->
       case b of
         TPair x' y' -> do
-          xExpr <- subtypeOf (Fst expr, x) x'
-          yExpr <- subtypeOf (Snd expr, y) y'
-          pure $ Pair xExpr yExpr
+          xExpr <- subtypeOf ctx (fst expr, x) x'
+          yExpr <- subtypeOf ctx (snd expr, y) y'
+          pure $ pair xExpr yExpr
         TUnknown u -> expr <$ solve u a
         _ -> typeError $ NotASubtypeOf a b
     TU8 ->
       case b of
         TU8 -> pure expr
-        TU16 -> pure $ Var (Name "u8_to_u16") `App` expr
-        TU32 -> pure $ Var (Name "u8_to_u32") `App` expr
-        TU64 -> pure $ Var (Name "u8_to_u64") `App` expr
+        TU16 -> pure $ Var (Name "u8_to_u16") `app` expr
+        TU32 -> pure $ Var (Name "u8_to_u32") `app` expr
+        TU64 -> pure $ Var (Name "u8_to_u64") `app` expr
         TUnknown u -> expr <$ solve u a
         _ -> typeError $ NotASubtypeOf a b
     TU16 ->
       case b of
         TU16 -> pure expr
-        TU32 -> pure $ Var (Name "u16_to_u32") `App` expr
-        TU64 -> pure $ Var (Name "u16_to_u64") `App` expr
+        TU32 -> pure $ Var (Name "u16_to_u32") `app` expr
+        TU64 -> pure $ Var (Name "u16_to_u64") `app` expr
         TUnknown u -> expr <$ solve u a
         _ -> typeError $ NotASubtypeOf a b
     TU32 ->
       case b of
         TU32 -> pure expr
-        TU64 -> pure $ Var (Name "u32_to_u64") `App` expr
+        TU64 -> pure $ Var (Name "u32_to_u64") `app` expr
         TUnknown u -> expr <$ solve u a
         _ -> typeError $ NotASubtypeOf a b
     TU64 ->
@@ -387,7 +509,7 @@ subtypeOf' (expr, a) b =
 check :: [(Name, Ty)] -> Expr -> Ty -> TC Expr
 check ctx expr ty = do
   (expr', ty') <- infer ctx expr
-  subtypeOf (expr', ty') ty
+  subtypeOf ctx (expr', ty') ty
 
 parens :: String -> String
 parens a = "(" <> a <> ")"
@@ -400,6 +522,7 @@ showTy ty =
     TArrow a b ->
       (case a of
         TArrow _ _ -> parens
+        TForall _ _ -> parens
         _ -> id)
       (showTy a) <>
       " -> " <>
@@ -439,6 +562,8 @@ showExpr expr =
       (showExpr f) <> 
       " " <> 
       (case x of
+        Lam _ _ _ -> parens
+        LamTy _ _ -> parens
         App _ _ -> parens
         Fst _ -> parens
         Snd _ -> parens
@@ -455,6 +580,8 @@ showExpr expr =
       " @" <> 
       (case t of
         TArrow _ _ -> parens
+        TForall _ _ -> parens
+        TExists _ _ -> parens
         _ -> id)
       (showTy t)
     Pack x ty e ->
@@ -476,7 +603,7 @@ showExpr expr =
     Pair a b ->
       "(" <>
       showExpr a <>
-      "," <>
+      ", " <>
       showExpr b <>
       ")"
     Fst a ->
@@ -493,11 +620,106 @@ main = do
   either print putStrLn . fmap showExpr . runTC $ 
     zonkExpr =<<
     check [] (Lam (Name "x") Nothing $ Var $ Name "x") (TArrow TU8 TU8)
+  putStrLn ""
   
   either print putStrLn . fmap showExpr . runTC $ 
     zonkExpr =<<
     check [] (Lam (Name "x") Nothing $ Var $ Name "x") (TArrow TU8 TU32)
+  putStrLn ""
   
-  either print putStrLn . fmap showExpr . runTC $ 
+  either print ((\(x, y) -> putStrLn x *> putStrLn y) . bimap showExpr showTy) . runTC $ 
+    bitraverse zonkExpr zonkTy =<<
+    infer 
+      [] 
+      (Lam 
+        (Name "f") 
+        (Just $ TArrow (TForall (Name "a") $ TArrow (TVar $ Name "a") (TVar $ Name "a")) TU8) $
+       Lam
+         (Name "x")
+         Nothing $
+       App (Var $ Name "f") (Var $ Name "x")
+      ) 
+  putStrLn ""
+  
+  either print ((\(x, y) -> putStrLn x *> putStrLn y) . bimap showExpr showTy) . runTC $ 
+    bitraverse zonkExpr zonkTy =<<
+    infer 
+      [] 
+      (Lam 
+        (Name "f") 
+        (Just $ TArrow (TForall (Name "a") $ TArrow (TVar $ Name "a") (TVar $ Name "a")) TU8) $
+       Lam
+         (Name "x")
+         Nothing $
+       Ann (App (Var $ Name "f") (Var $ Name "x")) TU16
+      ) 
+  putStrLn ""
+  
+  either print ((\(x, y) -> putStrLn x *> putStrLn y) . bimap showExpr showTy) . runTC $ 
+    bitraverse zonkExpr zonkTy =<<
+    infer 
+      [] 
+      -- (\x -> \(f : (forall a. a -> a) -> u8) -> f x) (\y -> y)
+      -- ~>
+      -- (\x -> \(f : (forall a. a -> a) -> u8) -> f x) (forall a. \(y : a) -> y)
+      (
+      (Lam
+         (Name "x")
+         Nothing $
+       Lam 
+        (Name "f") 
+        (Just $ TArrow (TForall (Name "a") $ TArrow (TVar $ Name "a") (TVar $ Name "a")) TU8) $
+       Ann (App (Var $ Name "f") (Var $ Name "x")) TU16
+      ) `App`
+      Lam (Name "y") Nothing (Var $ Name "y")
+      )
+  putStrLn ""
+  
+  either print ((\(x, y) -> putStrLn x *> putStrLn y) . bimap showExpr showTy) . runTC $ 
+    bitraverse zonkExpr zonkTy =<<
+    infer 
+      [] 
+      -- (\(f : forall a. a -> a) -> f 99) (\y -> y)
+      -- ~>
+      -- (\(f : forall a. a -> a) -> f @u8 99_u8) (forall a. \(y : a) -> y)
+      (Lam 
+        (Name "f") 
+        (Just $ TForall (Name "a") $ TArrow (TVar $ Name "a") (TVar $ Name "a"))
+        (App (Var $ Name "f") (U8 99))
+       `App`
+       Lam (Name "y") Nothing (Var $ Name "y")
+      )
+  putStrLn ""
+
+  either print ((\(x, y) -> putStrLn x *> putStrLn y) . bimap showExpr showTy) . runTC $ 
+    bitraverse zonkExpr zonkTy =<<
+    infer 
+      [] 
+      -- \(f : forall a. a -> a) -> f 99
+      -- ~>
+      -- \(f : forall a. a -> a) -> f @u8 99_u8
+      (Lam 
+        (Name "f") 
+        (Just $ TForall (Name "a") $ TArrow (TVar $ Name "a") (TVar $ Name "a"))
+        (App (Var $ Name "f") (U8 99))
+      )
+
+  either print (putStrLn . showExpr) . runTC $ 
     zonkExpr =<<
-    check [] (Lam (Name "x") Nothing $ Var $ Name "x") (TForall (Name "a") $ TArrow (TVar $ Name "a") (TVar $ Name "a"))
+    check 
+      [] 
+      ((Lam (Name "x") Nothing $ Snd $ Var (Name "x"))
+       `App`
+       Pair (U8 1) (U8 2)
+      )
+      TU16
+
+  either print (putStrLn . showExpr) . runTC $ 
+    zonkExpr =<<
+    check 
+      [] 
+      ((Lam (Name "x") (Just $ TPair TU8 TU16) $ Snd $ Var (Name "x"))
+       `App`
+       Pair (U8 1) (U8 2)
+      )
+      TU16
