@@ -20,6 +20,7 @@ data Ty
   | TExists Name Ty
 
   | TPair Ty Ty
+  | TSum Ty Ty
 
   | TU8
   | TU16
@@ -38,6 +39,7 @@ substTy arg@(name, newTy) ty =
     TForall name' t -> TForall name' (substTy arg t)
     TExists name' t -> TExists name' (substTy arg t)
     TPair a b -> TPair (substTy arg a) (substTy arg b)
+    TSum a b -> TSum (substTy arg a) (substTy arg b)
     TU8 -> ty
     TU16 -> ty
     TU32 -> ty
@@ -53,6 +55,7 @@ hasVar name ty =
     TForall name' t -> if name == name' then False else hasVar name t
     TExists name' t -> if name == name' then False else hasVar name t
     TPair a b -> hasVar name a || hasVar name b
+    TSum a b -> hasVar name a || hasVar name b
     TU8 -> False
     TU16 -> False
     TU32 -> False
@@ -68,6 +71,7 @@ occursIn meta ty =
     TForall _ t -> occursIn meta t
     TExists _ t -> occursIn meta t
     TPair a b -> occursIn meta a || occursIn meta b
+    TSum a b -> occursIn meta a || occursIn meta b
     TU8 -> False
     TU16 -> False
     TU32 -> False
@@ -83,6 +87,7 @@ allMetas ty =
     TForall _ t -> allMetas t
     TExists _ t -> allMetas t
     TPair a b -> allMetas a `List.union` allMetas b
+    TSum a b -> allMetas a `List.union` allMetas b
     TU8 -> []
     TU16 -> []
     TU32 -> []
@@ -122,6 +127,9 @@ data Expr
   | Pair Expr Expr
   | Fst Expr
   | Snd Expr
+  
+  | Inl Expr
+  | Inr Expr
  
   | Bool Bool
   deriving (Eq, Show)
@@ -149,10 +157,17 @@ substExpr arg@(name, newExpr) expr =
     Pair a b -> Pair (substExpr arg a) (substExpr arg b)
     Fst a -> Fst (substExpr arg a)
     Snd a -> Snd (substExpr arg a)
+    Inl a -> Inl (substExpr arg a)
+    Inr a -> Inr (substExpr arg a)
     Bool _ -> expr
+
+elim :: Expr -> Expr -> Expr -> Expr
+elim f g = App (App (App (Var (Name "elim")) f) g)
 
 app :: Expr -> Expr -> Expr
 app (Lam name _ body) x = substExpr (name, x) body
+app (App (App (Var (Name "elim")) f) _) (Inl x) = app f x
+app (App (App (Var (Name "elim")) _) g) (Inr x) = app g x
 app f x = App f x
 
 lam :: Name -> Maybe Ty -> Expr -> Expr
@@ -201,6 +216,8 @@ substTyExpr arg@(name, _) expr =
     Pair a b -> Pair (substTyExpr arg a) (substTyExpr arg b)
     Fst a -> Fst (substTyExpr arg a)
     Snd a -> Snd (substTyExpr arg a)
+    Inl a -> Inl (substTyExpr arg a)
+    Inr a -> Inr (substTyExpr arg a)
     Bool _ -> expr
 
 appTy :: Expr -> Ty -> Expr
@@ -280,6 +297,7 @@ zonkTy ty =
     TForall x t -> TForall x <$> zonkTy t
     TExists x t -> TExists x <$> zonkTy t
     TPair a b -> TPair <$> zonkTy a <*> zonkTy b
+    TSum a b -> TSum <$> zonkTy a <*> zonkTy b
     TU8 -> pure ty
     TU16 -> pure ty
     TU32 -> pure ty
@@ -305,11 +323,23 @@ zonkExpr expr =
     Pair a b -> Pair <$> zonkExpr a <*> zonkExpr b
     Fst e -> Fst <$> zonkExpr e
     Snd e -> Snd <$> zonkExpr e
+    Inl e -> Inl <$> zonkExpr e
+    Inr e -> Inr <$> zonkExpr e
     Bool _ -> pure expr
 
 infer :: [(Name, Ty)] -> Expr -> TC (Expr, Ty)
 infer ctx expr =
   case expr of
+    Var (Name "elim") ->
+      pure
+      ( Var $ Name "elim"
+      , TForall (Name "a") $
+        TForall (Name "b") $
+        TForall (Name "x") $
+        TArrow (TArrow (TVar $ Name "a") (TVar $ Name "x")) $
+        TArrow (TArrow (TVar $ Name "b") (TVar $ Name "x")) $
+        TArrow (TSum (TVar $ Name "a") (TVar $ Name "b")) (TVar $ Name "x")
+      )
     Var x ->
       case lookup x ctx of
         Nothing -> typeError $ NotInScope x
@@ -382,6 +412,15 @@ infer ctx expr =
       b <- unknown
       e' <- check ctx e (TPair a b)
       pure (Snd e', b)
+    
+    Inl a -> do
+      (a', aTy) <- infer ctx a
+      bTy <- unknown
+      pure (Inl a', TSum aTy bTy)
+    Inr b -> do
+      aTy <- unknown
+      (b', bTy) <- infer ctx b
+      pure (Inr b', TSum aTy bTy)
 
     Bool _ -> pure (expr, TBool)
 
@@ -474,6 +513,23 @@ subtypeOf' ctx (expr, a) b =
           pure $ pair xExpr yExpr
         TUnknown u -> expr <$ solve u a
         _ -> typeError $ NotASubtypeOf a b
+    TSum x y ->
+      case b of
+        TSum x' y' -> do
+          lname <- freshName
+          rname <- freshName
+          xExpr <- subtypeOf ctx (Var lname, x) x'
+          yExpr <- subtypeOf ctx (Var rname, y) y'
+          pure $ 
+            App
+              (App 
+                (App 
+                  (AppTy (AppTy (AppTy (Var $ Name "elim") x) y) (TSum x' y'))
+                  (Lam lname (Just x) $ Inl xExpr)) 
+                (Lam rname (Just y) $ Inr yExpr))
+              expr
+        TUnknown u -> expr <$ solve u a
+        _ -> typeError $ NotASubtypeOf a b
     TU8 ->
       case b of
         TU8 -> pure expr
@@ -530,6 +586,19 @@ showTy ty =
     TForall x t -> "forall " <> showName x <> ". " <> showTy t
     TExists x t -> "exists " <> showName x <> ". " <> showTy t
     TPair a b -> "(" <> showTy a <> ", " <> showTy b <> ")"
+    TSum a b -> 
+      (case a of
+        TForall _ _ -> parens
+        TExists _ _ -> parens
+        _ -> id)
+      (showTy a) <> 
+      " + " <> 
+      (case b of
+        TSum _ _ -> parens
+        TForall _ _ -> parens
+        TExists _ _ -> parens
+        _ -> id)
+      (showTy b)
     TU8 -> "u8"
     TU16 -> "u16"
     TU32 -> "u32"
@@ -567,6 +636,8 @@ showExpr expr =
         App _ _ -> parens
         Fst _ -> parens
         Snd _ -> parens
+        Inl _ -> parens
+        Inr _ -> parens
         _ -> id)
       (showExpr x)
     LamTy x e ->
@@ -582,6 +653,7 @@ showExpr expr =
         TArrow _ _ -> parens
         TForall _ _ -> parens
         TExists _ _ -> parens
+        TSum _ _ -> parens
         _ -> id)
       (showTy t)
     Pack x ty e ->
@@ -612,6 +684,12 @@ showExpr expr =
     Snd a ->
       "snd " <>
       showExpr a
+    Inl a ->
+      "inl" <>
+      "(" <> showExpr a <> ")"
+    Inr a ->
+      "inr" <>
+      "(" <> showExpr a <> ")"
     Bool b ->
       if b then "true" else "false"
 
@@ -723,3 +801,11 @@ main = do
        Pair (U8 1) (U8 2)
       )
       TU16
+
+  either print ((\(x, y) -> putStrLn x *> putStrLn y) . bimap showExpr showTy) . runTC $ 
+    bitraverse zonkExpr zonkTy =<<
+    infer 
+      [] 
+      (Lam (Name "x") (Just $ TSum TU8 TU16) $
+      Var (Name "x") `Ann` TSum TU16 TU16
+      )
