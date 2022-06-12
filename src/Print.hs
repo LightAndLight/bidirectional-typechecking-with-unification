@@ -1,8 +1,8 @@
 module Print where
 
-import Type (Ty (..))
-import Core (Expr(..))
+import Core (Expr (..))
 import Name (showName)
+import Type (Ty (..))
 
 parens :: String -> String
 parens a = "(" <> a <> ")"
@@ -23,7 +23,23 @@ showTy ty =
         <> showTy b
     TForall x t -> "forall " <> showName x <> ". " <> showTy t
     TExists x t -> "exists " <> showName x <> ". " <> showTy t
-    TPair a b -> "(" <> showTy a <> ", " <> showTy b <> ")"
+    TPair a b ->
+      ( case a of
+          TForall _ _ -> parens
+          TExists _ _ -> parens
+          TSum _ _ -> parens
+          _ -> id
+      )
+        (showTy a)
+        <> " * "
+        <> ( case b of
+              TPair _ _ -> parens
+              TForall _ _ -> parens
+              TExists _ _ -> parens
+              TSum _ _ -> parens
+              _ -> id
+           )
+          (showTy b)
     TSum a b ->
       ( case a of
           TForall _ _ -> parens
@@ -58,12 +74,8 @@ showExpr expr =
         (showExpr e)
         <> " : "
         <> showTy ty
-    Lam x mTy e ->
-      case mTy of
-        Nothing ->
-          "\\" <> showName x <> " -> " <> showExpr e
-        Just ty ->
-          "\\(" <> showName x <> " : " <> showTy ty <> ") -> " <> showExpr e
+    Lam x ty e ->
+      "\\(" <> showName x <> " : " <> showTy ty <> ") -> " <> showExpr e
     App f x ->
       ( case f of
           Lam _ _ _ -> parens

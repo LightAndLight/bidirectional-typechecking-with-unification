@@ -1,6 +1,8 @@
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
+
 module Core where
 
-import qualified Data.List as List
 import Data.Word (Word16, Word32, Word64, Word8)
 import Name (Name (..))
 import Type (Ty (..), substTy)
@@ -8,7 +10,7 @@ import Type (Ty (..), substTy)
 data Expr
   = Var Name
   | Ann Expr Ty
-  | Lam Name (Maybe Ty) Expr
+  | Lam Name Ty Expr
   | App Expr Expr
   | LamTy Name Expr
   | AppTy Expr Ty
@@ -62,7 +64,7 @@ app (App (App (Var (Name "elim")) f) _) (Inl x) = app f x
 app (App (App (Var (Name "elim")) _) g) (Inr x) = app g x
 app f x = App f x
 
-lam :: Name -> Maybe Ty -> Expr -> Expr
+lam :: Name -> Ty -> Expr -> Expr
 lam name _ (App f (Var name')) | name == name' = f
 lam name ty body = Lam name ty body
 
@@ -87,7 +89,7 @@ substTyExpr arg@(name, _) expr =
   case expr of
     Var _ -> expr
     Ann e t -> Ann (substTyExpr arg e) (substTy arg t)
-    Lam x ty e -> Lam x (substTy arg <$> ty) (substTyExpr arg e)
+    Lam x ty e -> Lam x (substTy arg ty) (substTyExpr arg e)
     App f x -> App (substTyExpr arg f) (substTyExpr arg x)
     LamTy x e ->
       if name == x then LamTy x e else LamTy x (substTyExpr arg e)
@@ -115,3 +117,10 @@ substTyExpr arg@(name, _) expr =
 appTy :: Expr -> Ty -> Expr
 appTy (LamTy name body) t = substTyExpr (name, t) body
 appTy e t = AppTy e t
+
+castTo :: forall a. Num a => Integer -> Maybe a
+castTo n =
+  if fromIntegral (minBound @Word8) <= n
+    && n <= fromIntegral (maxBound @Word8)
+    then Just (fromIntegral @Integer @a n)
+    else Nothing

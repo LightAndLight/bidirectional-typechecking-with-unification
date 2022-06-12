@@ -1,19 +1,29 @@
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE TypeApplications #-}
 
 module Check where
 
-import Prelude hiding (fst, snd)
-import Name (Name (..))
-import Type (Ty (..), occursIn, hasVar, substTy)
-import Core (Expr (..), lamTy, appTy, app, lam, fst, snd, pair)
 import Control.Monad (when)
+import Core (Expr (..), app, appTy, castTo, fst, lam, lamTy, pair, snd)
 import Data.Foldable (foldlM)
+import Data.Word (Word16, Word32, Word64, Word8)
+import Name (Name (..))
+import qualified Syntax
+import Type (Ty (..), hasVar, occursIn, substTy)
+import Prelude hiding (fst, snd)
+
+data Actual
+  = Number
+  | Ty Ty
+  deriving (Eq, Show)
 
 data Error
   = NotInScope Name
-  | NotASubtypeOf Ty Ty
+  | NotASubtypeOf Ty Actual
   | EscapedTyVar Name
   | Occurs Int Ty
+  | Can'tInfer Syntax.Expr
+  | OutOfBounds Integer Ty
   deriving (Eq, Show)
 
 data State = State {stMetas :: Int, stFresh :: Int, stSolutions :: [(Int, Ty)]}
@@ -94,7 +104,7 @@ zonkExpr expr =
   case expr of
     Var _ -> pure expr
     Ann e ty -> Ann <$> zonkExpr e <*> zonkTy ty
-    Lam x ty e -> Lam x <$> traverse zonkTy ty <*> zonkExpr e
+    Lam x ty e -> Lam x <$> zonkTy ty <*> zonkExpr e
     App f x -> App <$> zonkExpr f <*> zonkExpr x
     LamTy x e -> LamTy x <$> zonkExpr e
     AppTy e t -> AppTy <$> zonkExpr e <*> zonkTy t
@@ -112,10 +122,10 @@ zonkExpr expr =
     Inr e -> Inr <$> zonkExpr e
     Bool _ -> pure expr
 
-infer :: [(Name, Ty)] -> Expr -> TC (Expr, Ty)
+infer :: [(Name, Ty)] -> Syntax.Expr -> TC (Expr, Ty)
 infer ctx expr =
   case expr of
-    Var (Name "elim") ->
+    Syntax.Var (Name "elim") ->
       pure
         ( Var $ Name "elim"
         , TForall (Name "a") $
@@ -125,37 +135,37 @@ infer ctx expr =
                   TArrow (TArrow (TVar $ Name "b") (TVar $ Name "x")) $
                     TArrow (TSum (TVar $ Name "a") (TVar $ Name "b")) (TVar $ Name "x")
         )
-    Var x ->
+    Syntax.Var x ->
       case lookup x ctx of
         Nothing -> typeError $ NotInScope x
-        Just ty -> pure (expr, ty)
-    Ann e t -> do
+        Just ty -> pure (Var x, ty)
+    Syntax.Ann e t -> do
       e' <- check ctx e t
       pure (e', t)
-    Lam x mTy e -> do
+    Syntax.Lam x mTy e -> do
       inTy <- case mTy of
         Nothing -> unknown
         Just ty -> pure ty
       (e', eTy) <- infer ((x, inTy) : ctx) e
-      pure (Lam x (Just inTy) e', TArrow inTy eTy)
-    App f x -> do
+      pure (Lam x inTy e', TArrow inTy eTy)
+    Syntax.App f x -> do
       inTy <- unknown
       outTy <- unknown
       f' <- check ctx f (TArrow inTy outTy)
       x' <- check ctx x inTy
       pure (App f' x', outTy)
-    LamTy x e -> do
+    Syntax.LamTy x e -> do
       (e', eTy) <- infer ctx e
       pure (LamTy x e', TForall x eTy)
-    AppTy e t -> do
+    Syntax.AppTy e t -> do
       name <- freshName
       ty <- unknown
       e' <- check ctx e (TForall name ty)
       pure (AppTy e' t, ty)
-    Pack name ty e -> do
+    Syntax.Pack name ty e -> do
       (e', eTy) <- infer ctx e
       pure (Pack name ty e', TExists name eTy)
-    Unpack (tyName, varName, v) rest -> do
+    Syntax.Unpack (tyName, varName, v) rest -> do
       name <- freshName
       ty <- unknown
       v' <- check ctx v (TExists name ty)
@@ -173,33 +183,30 @@ infer ctx expr =
           ctx
       when (escaped || hasVar tyName restTy) . typeError $ EscapedTyVar tyName
       pure (Unpack (tyName, varName, v') rest', restTy)
-    U8 _ -> pure (expr, TU8)
-    U16 _ -> pure (expr, TU16)
-    U32 _ -> pure (expr, TU32)
-    U64 _ -> pure (expr, TU64)
-    Pair a b -> do
+    Syntax.Number _ -> typeError $ Can'tInfer expr
+    Syntax.Pair a b -> do
       (a', aTy) <- infer ctx a
       (b', bTy) <- infer ctx b
       pure (Pair a' b', TPair aTy bTy)
-    Fst e -> do
+    Syntax.Fst e -> do
       a <- unknown
       b <- unknown
       e' <- check ctx e (TPair a b)
       pure (Fst e', a)
-    Snd e -> do
+    Syntax.Snd e -> do
       a <- unknown
       b <- unknown
       e' <- check ctx e (TPair a b)
       pure (Snd e', b)
-    Inl a -> do
+    Syntax.Inl a -> do
       (a', aTy) <- infer ctx a
       bTy <- unknown
       pure (Inl a', TSum aTy bTy)
-    Inr b -> do
+    Syntax.Inr b -> do
       aTy <- unknown
       (b', bTy) <- infer ctx b
       pure (Inr b', TSum aTy bTy)
-    Bool _ -> pure (expr, TBool)
+    Syntax.Bool b -> pure (Bool b, TBool)
 
 walk :: Ty -> TC Ty
 walk ty@(TUnknown u) = do
@@ -262,10 +269,10 @@ subtypeOf' ctx (expr, a) b =
         TVar v' ->
           if v == v'
             then pure expr
-            else typeError $ NotASubtypeOf a b
+            else typeError $ NotASubtypeOf a (Ty b)
         TUnknown u -> expr <$ solve u a
         _ ->
-          typeError $ NotASubtypeOf a b
+          typeError $ NotASubtypeOf a (Ty b)
     TUnknown u ->
       case b of
         TUnknown u' | u == u' -> pure expr
@@ -276,9 +283,9 @@ subtypeOf' ctx (expr, a) b =
           name <- freshName
           xExpr <- subtypeOf ctx (Var name, x') x
           yExpr <- subtypeOf ctx (expr `app` xExpr, y) y'
-          pure $ lam name (Just x) yExpr
+          pure $ lam name x yExpr
         TUnknown u -> expr <$ solve u a
-        _ -> typeError $ NotASubtypeOf a b
+        _ -> typeError $ NotASubtypeOf a (Ty b)
     TExists x t -> error "exists" x t
     TPair x y ->
       case b of
@@ -287,7 +294,7 @@ subtypeOf' ctx (expr, a) b =
           yExpr <- subtypeOf ctx (snd expr, y) y'
           pure $ pair xExpr yExpr
         TUnknown u -> expr <$ solve u a
-        _ -> typeError $ NotASubtypeOf a b
+        _ -> typeError $ NotASubtypeOf a (Ty b)
     TSum x y ->
       case b of
         TSum x' y' -> do
@@ -300,13 +307,13 @@ subtypeOf' ctx (expr, a) b =
               ( App
                   ( App
                       (AppTy (AppTy (AppTy (Var $ Name "elim") x) y) (TSum x' y'))
-                      (Lam lname (Just x) $ Inl xExpr)
+                      (Lam lname x $ Inl xExpr)
                   )
-                  (Lam rname (Just y) $ Inr yExpr)
+                  (Lam rname y $ Inr yExpr)
               )
               expr
         TUnknown u -> expr <$ solve u a
-        _ -> typeError $ NotASubtypeOf a b
+        _ -> typeError $ NotASubtypeOf a (Ty b)
     TU8 ->
       case b of
         TU8 -> pure expr
@@ -314,32 +321,45 @@ subtypeOf' ctx (expr, a) b =
         TU32 -> pure $ Var (Name "u8_to_u32") `app` expr
         TU64 -> pure $ Var (Name "u8_to_u64") `app` expr
         TUnknown u -> expr <$ solve u a
-        _ -> typeError $ NotASubtypeOf a b
+        _ -> typeError $ NotASubtypeOf a (Ty b)
     TU16 ->
       case b of
         TU16 -> pure expr
         TU32 -> pure $ Var (Name "u16_to_u32") `app` expr
         TU64 -> pure $ Var (Name "u16_to_u64") `app` expr
         TUnknown u -> expr <$ solve u a
-        _ -> typeError $ NotASubtypeOf a b
+        _ -> typeError $ NotASubtypeOf a (Ty b)
     TU32 ->
       case b of
         TU32 -> pure expr
         TU64 -> pure $ Var (Name "u32_to_u64") `app` expr
         TUnknown u -> expr <$ solve u a
-        _ -> typeError $ NotASubtypeOf a b
+        _ -> typeError $ NotASubtypeOf a (Ty b)
     TU64 ->
       case b of
         TU64 -> pure expr
         TUnknown u -> expr <$ solve u a
-        _ -> typeError $ NotASubtypeOf a b
+        _ -> typeError $ NotASubtypeOf a (Ty b)
     TBool ->
       case b of
         TBool -> pure expr
         TUnknown u -> expr <$ solve u a
-        _ -> typeError $ NotASubtypeOf a b
+        _ -> typeError $ NotASubtypeOf a (Ty b)
 
-check :: [(Name, Ty)] -> Expr -> Ty -> TC Expr
+check :: [(Name, Ty)] -> Syntax.Expr -> Ty -> TC Expr
+check _ expr@(Syntax.Number n) ty = do
+  ty' <- zonkTy ty
+  case ty' of
+    TU8 ->
+      maybe (typeError $ OutOfBounds n TU8) (pure . U8) (castTo @Word8 n)
+    TU16 ->
+      maybe (typeError $ OutOfBounds n TU16) (pure . U16) (castTo @Word16 n)
+    TU32 ->
+      maybe (typeError $ OutOfBounds n TU32) (pure . U32) (castTo @Word32 n)
+    TU64 ->
+      maybe (typeError $ OutOfBounds n TU64) (pure . U64) (castTo @Word64 n)
+    TUnknown _ -> typeError $ Can'tInfer expr
+    _ -> typeError $ NotASubtypeOf ty Number
 check ctx expr ty = do
   (expr', ty') <- infer ctx expr
   subtypeOf ctx (expr', ty') ty

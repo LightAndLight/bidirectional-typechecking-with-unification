@@ -5,51 +5,38 @@ module Parse where
 
 import Control.Applicative (many, optional, (<|>))
 import Data.Char (isAlpha, isAlphaNum)
-import Data.Word (Word8)
 import Name (Name (..))
 import Streaming.Chars (Chars)
 import Syntax (Expr (..))
 import Text.Parser.Char (char, satisfy, string)
-import Text.Parser.Combinators (Parsing (unexpected))
-import Text.Parser.Token (decimal, parens, symbol, symbolic)
+import Text.Parser.Token (decimal, parens, symbol, symbolic, token)
 import Text.Sage (Parser)
 import Type (Ty (..))
 
 name :: Chars s => Parser s Name
-name = Name <$> ((:) <$> satisfy isAlpha <*> many (satisfy isAlphaNum))
-
-castTo :: forall a. Num a => Integer -> Maybe a
-castTo n =
-  if n < fromIntegral (maxBound @Word8)
-    then Just (fromIntegral @Integer @a n)
-    else Nothing
+name = token $ Name <$> ((:) <$> satisfy isAlpha <*> many (satisfy isAlphaNum))
 
 simpleExpr :: forall s. Chars s => Parser s Expr
 simpleExpr =
   Var <$> name
     <|> intLiteral
-    <|> parens (Pair <$> expr <* symbolic ',' <*> expr)
+    <|> parens ((\a -> maybe a (a `Pair`)) <$> expr <*> optional (symbolic ',' *> expr))
     <|> Bool True <$ symbol "true"
     <|> Bool False <$ symbol "false"
   where
-    integerToExpr :: forall a. Num a => String -> (a -> Expr) -> Integer -> Parser s Expr
-    integerToExpr size f x =
-      maybe
-        (unexpected $ show x <> " is out of the range of " <> size)
-        (pure . f)
-        (castTo @a x)
-
     intLiteral :: Parser s Expr
-    intLiteral = do
-      n <- decimal
-      ( char '_'
-          *> ( string "u8" *> integerToExpr "u8" U8 n
-                <|> string "u16" *> integerToExpr "u16" U16 n
-                <|> string "u32" *> integerToExpr "u32" U32 n
-                <|> string "u64" *> integerToExpr "u64" U64 n
-             )
-        )
-        <|> pure (Number n)
+    intLiteral =
+      token $
+        (\n -> maybe (Number n) ($ Number n))
+          <$> decimal
+          <*> optional
+            ( char '_'
+                *> ( (`Ann` TU8) <$ string "u8"
+                      <|> (`Ann` TU16) <$ string "u16"
+                      <|> (`Ann` TU32) <$ string "u32"
+                      <|> (`Ann` TU64) <$ string "u64"
+                   )
+            )
 
 mkApp :: Expr -> Expr -> Expr
 mkApp (Var (Name "fst")) a = Fst a
@@ -75,7 +62,7 @@ expr =
     <|> (\(arg, mTy) -> Lam arg mTy)
       <$ symbolic '\\'
       <*> ( (,) <$> name <*> pure Nothing
-              <|> parens ((,) <$> name <* char ':' <*> fmap Just type_)
+              <|> parens ((,) <$> name <* symbolic ':' <*> fmap Just type_)
           )
       <* symbol "->"
       <*> expr
@@ -103,20 +90,25 @@ expr =
 
 simpleType :: Chars s => Parser s Ty
 simpleType =
-  TVar <$> name
-    <|> parens (TPair <$> type_ <* symbolic ',' <*> type_)
+  parens type_
     <|> TU8 <$ symbol "u8"
     <|> TU16 <$ symbol "u16"
     <|> TU32 <$ symbol "u32"
     <|> TU64 <$ symbol "u64"
     <|> TBool <$ symbol "bool"
+    <|> TVar <$> name
+
+productType :: Chars s => Parser s Ty
+productType = foldl TPair <$> simpleType <*> many (symbolic '*' *> simpleType)
 
 sumType :: Chars s => Parser s Ty
-sumType = foldl TSum <$> simpleType <*> many simpleType
+sumType = foldl TSum <$> productType <*> many (symbolic '+' *> productType)
 
 arrowType :: Chars s => Parser s Ty
 arrowType =
-  foldr TArrow <$> sumType <*> many (symbol "->" *> sumType)
+  (\a -> maybe a (TArrow a))
+    <$> sumType
+      <*> optional (symbol "->" *> arrowType)
 
 type_ :: Chars s => Parser s Ty
 type_ =
