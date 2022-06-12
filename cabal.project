@@ -1,0 +1,6 @@
+packages: .
+
+source-repository-package
+  type: git
+  location: https://github.com/LightAndLight/sage
+  tag: 10abce5f5e9008a8d817a852076ad570e52f5e50
