@@ -32,9 +32,9 @@ simpleExpr =
           <*> optional
             ( char '_'
                 *> ( (`Ann` TU8) <$ string "u8"
-                      <|> (`Ann` TU16) <$ string "u16"
-                      <|> (`Ann` TU32) <$ string "u32"
-                      <|> (`Ann` TU64) <$ string "u64"
+                       <|> (`Ann` TU16) <$ string "u16"
+                       <|> (`Ann` TU32) <$ string "u32"
+                       <|> (`Ann` TU64) <$ string "u64"
                    )
             )
 
@@ -52,20 +52,15 @@ appExpr =
 
 expr :: forall s. Chars s => Parser s Expr
 expr =
-  -- e
-  -- e : ty
-  (\e -> maybe e (e `Ann`))
-    <$> appExpr
-      <*> optional (symbolic ':' *> type_)
-    -- \x -> rest
-    -- \(x : ty) -> rest
-    <|> (\(arg, mTy) -> Lam arg mTy)
-      <$ symbolic '\\'
-      <*> ( (,) <$> name <*> pure Nothing
-              <|> parens ((,) <$> name <* symbolic ':' <*> fmap Just type_)
-          )
-      <* symbol "->"
-      <*> expr
+  -- \x -> rest
+  -- \(x : ty) -> rest
+  (\(arg, mTy) -> Lam arg mTy)
+    <$ symbolic '\\'
+    <*> ( (,) <$> name <*> pure Nothing
+            <|> parens ((,) <$> name <* symbolic ':' <*> fmap Just type_)
+        )
+    <* symbol "->"
+    <*> expr
     -- forall x. rest
     <|> LamTy
       <$ symbol "forall"
@@ -87,6 +82,12 @@ expr =
       <*> ((,,) <$> name <* symbolic '.' <*> name <* symbolic '=' <*> expr)
       <* symbol "in"
       <*> expr
+    <|>
+    -- e
+    -- e : ty
+    (\e -> maybe e (e `Ann`))
+      <$> appExpr
+      <*> optional (symbolic ':' *> type_)
 
 simpleType :: Chars s => Parser s Ty
 simpleType =
@@ -108,7 +109,7 @@ arrowType :: Chars s => Parser s Ty
 arrowType =
   (\a -> maybe a (TArrow a))
     <$> sumType
-      <*> optional (symbol "->" *> arrowType)
+    <*> optional (symbol "->" *> arrowType)
 
 type_ :: Chars s => Parser s Ty
 type_ =

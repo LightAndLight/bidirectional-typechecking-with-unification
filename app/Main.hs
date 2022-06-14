@@ -9,20 +9,23 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Options.Applicative as Options
 import qualified Parse
+import qualified Print
 import System.IO (stdin)
 import Text.Parser.Combinators (eof)
 import qualified Text.Sage as Sage
 
-data Cli = Eval {cliInput :: ByteString}
+data Cli = Infer {cliInput :: ByteString}
+
+inferParser :: Options.Parser Cli
+inferParser =
+  Infer <$> Options.strArgument (Options.metavar "EXPR")
 
 cliParser :: Options.Parser Cli
 cliParser =
   Options.subparser
-    ( Options.command "eval" $
+    ( Options.command "infer" $
         Options.info
-          ( Eval
-              <$> Options.strArgument (Options.metavar "FILE")
-          )
+          (inferParser <**> Options.helper)
           Options.fullDesc
     )
 
@@ -30,7 +33,7 @@ main :: IO ()
 main = do
   cli <- Options.execParser $ Options.info (cliParser <**> Options.helper) Options.fullDesc
   case cli of
-    Eval input -> do
+    Infer input -> do
       input' <-
         case input of
           "-" -> ByteString.hGetContents stdin
@@ -43,4 +46,5 @@ main = do
         case Check.runTC $ Check.infer [] expr >>= bitraverse Check.zonkExpr Check.zonkTy of
           Left err -> error $ show err
           Right res -> pure res
-      _ expr' ty
+      putStr "expr: " *> putStrLn (Print.showExpr expr')
+      putStr "type: " *> putStrLn (Print.showTy ty)

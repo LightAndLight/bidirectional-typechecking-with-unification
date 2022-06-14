@@ -21,7 +21,7 @@ library
   default-language: Haskell2010
   ghc-options: -Wall -Werror
 
-executable bidirectional-typechecking-with-unification
+executable bide
   main-is:          Main.hs
   build-depends:
     base ^>=4.16.2.0,
