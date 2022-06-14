@@ -5,23 +5,31 @@ module Parse where
 
 import Control.Applicative (many, optional, (<|>))
 import Data.Char (isAlpha, isAlphaNum)
+import qualified Data.HashMap.Strict as HashMap
 import Name (Name (..))
 import Streaming.Chars (Chars)
-import Syntax (Expr (..), Ty (..))
+import Syntax (Expr (..), FieldTy (..), Ty (..))
 import Text.Parser.Char (char, satisfy, string)
-import Text.Parser.Token (decimal, parens, symbol, symbolic, token)
+import Text.Parser.Combinators (sepBy)
+import Text.Parser.Token (braces, comma, decimal, parens, symbol, symbolic, token)
 import Text.Sage (Parser)
 
+ident :: Chars s => Parser s String
+ident = token $ (:) <$> satisfy isAlpha <*> many (satisfy isAlphaNum)
+
 name :: Chars s => Parser s Name
-name = token $ Name <$> ((:) <$> satisfy isAlpha <*> many (satisfy isAlphaNum))
+name = Name <$> ident
 
 simpleExpr :: forall s. Chars s => Parser s Expr
 simpleExpr =
-  Var <$> name
-    <|> intLiteral
+  intLiteral
     <|> parens ((\a -> maybe a (a `Pair`)) <$> expr <*> optional (symbolic ',' *> expr))
+    <|> braces (Record . HashMap.fromList <$> sepBy ((,) <$> ident <* symbolic '=' <*> expr) comma)
     <|> Bool True <$ symbol "true"
     <|> Bool False <$ symbol "false"
+    <|> None <$ symbol "None"
+    <|> Some <$ string "Some" <*> parens expr
+    <|> Var <$> name
   where
     intLiteral :: Parser s Expr
     intLiteral =
@@ -97,6 +105,22 @@ simpleType =
     <|> TU64 <$ symbol "u64"
     <|> TBool <$ symbol "bool"
     <|> TVar <$> name
+    <|> braces
+      ( TRecord . HashMap.fromList
+          <$> sepBy
+            ( do
+                field <- ident
+                isOptional <- True <$ symbolic '?' <|> pure False
+                if isOptional
+                  then (,) field . Optional <$ symbolic ':' <*> type_
+                  else
+                    (\ty -> maybe (field, Required ty) ((,) field . Default ty))
+                      <$ symbolic ':'
+                      <*> type_
+                      <*> optional (symbolic '=' *> expr)
+            )
+            comma
+      )
 
 productType :: Chars s => Parser s Ty
 productType = foldl TPair <$> simpleType <*> many (symbolic '*' *> simpleType)

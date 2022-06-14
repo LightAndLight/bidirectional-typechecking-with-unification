@@ -40,6 +40,9 @@ data Expr
   | Inl Expr
   | Inr Expr
   | Bool Bool
+  | None
+  | Some Expr
+  | Record (HashMap String Expr)
   deriving (Eq, Show)
 
 elim :: Expr -> Expr -> Expr -> Expr

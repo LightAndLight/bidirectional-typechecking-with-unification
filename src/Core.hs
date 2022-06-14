@@ -227,9 +227,6 @@ substExpr arg@(name, newExpr) expr =
     None -> expr
     Some a -> Some (substExpr arg a)
 
-elim :: Expr -> Expr -> Expr -> Expr
-elim f g = App (App (App (Var (Name "elim")) f) g)
-
 app :: Expr -> Expr -> Expr
 app (Lam name _ body) x = substExpr (name, x) body
 app (App (App (Var (Name "elim")) f) _) (Inl x) = app f x

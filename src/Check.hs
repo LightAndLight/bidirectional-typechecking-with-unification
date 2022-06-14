@@ -6,7 +6,22 @@
 module Check where
 
 import Control.Monad (when)
-import Core (Expr (..), FieldTy (..), Ty (..), app, appTy, castTo, fst, hasVar, lam, lamTy, occursIn, pair, snd, substTy)
+import Core
+  ( Expr (..),
+    FieldTy (..),
+    Ty (..),
+    app,
+    appTy,
+    castTo,
+    fst,
+    hasVar,
+    lam,
+    lamTy,
+    occursIn,
+    pair,
+    snd,
+    substTy,
+  )
 import Data.Foldable (foldlM)
 import qualified Data.HashMap.Strict as HashMap
 import Data.HashSet (HashSet)
@@ -15,6 +30,7 @@ import Data.Word (Word16, Word32, Word64, Word8)
 import Name (Name (..))
 import qualified Syntax
 import Prelude hiding (fst, snd)
+import qualified Prelude
 
 data Actual
   = Number
@@ -172,15 +188,24 @@ checkTy tctx ty =
 infer :: HashSet Name -> [(Name, Ty)] -> Syntax.Expr -> TC (Expr, Ty)
 infer tctx ctx expr =
   case expr of
-    Syntax.Var (Name "elim") ->
+    Syntax.Var (Name "elimSum") ->
       pure
-        ( Var $ Name "elim",
-          TForall (Name "a") $
-            TForall (Name "b") $
-              TForall (Name "x") $
-                TArrow (TArrow (TVar $ Name "a") (TVar $ Name "x")) $
-                  TArrow (TArrow (TVar $ Name "b") (TVar $ Name "x")) $
-                    TArrow (TSum (TVar $ Name "a") (TVar $ Name "b")) (TVar $ Name "x")
+        ( Var $ Name "elimSum",
+          TForall (Name "a")
+            . TForall (Name "b")
+            . TForall (Name "x")
+            . TArrow (TArrow (TVar $ Name "a") (TVar $ Name "x"))
+            . TArrow (TArrow (TVar $ Name "b") (TVar $ Name "x"))
+            $ TArrow (TSum (TVar $ Name "a") (TVar $ Name "b")) (TVar $ Name "x")
+        )
+    Syntax.Var (Name "elimOptional") ->
+      pure
+        ( Var $ Name "elimOptional",
+          TForall (Name "a")
+            . TForall (Name "x")
+            . TArrow (TVar $ Name "x")
+            . TArrow (TArrow (TVar $ Name "a") (TVar $ Name "x"))
+            $ TArrow (TOptional (TVar $ Name "a")) (TVar $ Name "x")
         )
     Syntax.Var x ->
       case lookup x ctx of
@@ -257,6 +282,18 @@ infer tctx ctx expr =
       (b', bTy) <- infer tctx ctx b
       pure (Inr b', TSum aTy bTy)
     Syntax.Bool b -> pure (Bool b, TBool)
+    Syntax.None -> do
+      a <- unknown
+      pure (None, TOptional a)
+    Syntax.Some a -> do
+      (a', aTy) <- infer tctx ctx a
+      pure (Some a', TOptional aTy)
+    Syntax.Record fields -> do
+      fields' <- traverse (infer tctx ctx) fields
+      pure
+        ( Record $ Prelude.fst <$> fields',
+          TRecord $ Required . Prelude.snd <$> fields'
+        )
 
 walk :: Ty -> TC Ty
 walk ty@(TUnknown u) = do
@@ -355,7 +392,7 @@ subtypeOf' ctx (expr, a) b =
             App
               ( App
                   ( App
-                      (AppTy (AppTy (AppTy (Var $ Name "elim") x) y) (TSum x' y'))
+                      (AppTy (AppTy (AppTy (Var $ Name "elimSum") x) y) (TSum x' y'))
                       (Lam lname x $ Inl xExpr)
                   )
                   (Lam rname y $ Inr yExpr)
@@ -420,10 +457,10 @@ subtypeOf' ctx (expr, a) b =
                           pure None
                         Just (getFieldTy -> ty) ->
                           Some <$> subtypeOf ctx (Project expr name, ty) ty'
-                    Default ty' expr ->
+                    Default ty' e ->
                       case HashMap.lookup name fields of
                         Nothing ->
-                          pure expr
+                          pure e
                         Just (getFieldTy -> ty) ->
                           subtypeOf ctx (Project expr name, ty) ty'
               )
@@ -433,7 +470,25 @@ subtypeOf' ctx (expr, a) b =
         _ -> typeError $ NotASubtypeOf a (Ty b)
     TOptional x ->
       case b of
-        TOptional y -> _ x y
+        TOptional y -> do
+          name <- freshName
+          x' <- subtypeOf ctx (Var name, x) y
+          pure $
+            App
+              ( App
+                  ( App
+                      ( AppTy
+                          ( AppTy
+                              (Var $ Name "elimOptional")
+                              x
+                          )
+                          (TOptional y)
+                      )
+                      None
+                  )
+                  (Lam name x $ Some x')
+              )
+              expr
         TUnknown u -> expr <$ solve u a
         _ -> typeError $ NotASubtypeOf a (Ty b)
 

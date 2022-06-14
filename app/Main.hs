@@ -43,7 +43,7 @@ main = do
           Left err -> error $ show err
           Right expr -> pure expr
       (expr', ty) <-
-        case Check.runTC $ Check.infer [] expr >>= bitraverse Check.zonkExpr Check.zonkTy of
+        case Check.runTC $ Check.infer mempty mempty expr >>= bitraverse Check.zonkExpr Check.zonkTy of
           Left err -> error $ show err
           Right res -> pure res
       putStr "expr: " *> putStrLn (Print.showExpr expr')
