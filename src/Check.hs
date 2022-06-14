@@ -1,15 +1,19 @@
 {-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeApplications #-}
+{-# LANGUAGE ViewPatterns #-}
 
 module Check where
 
 import Control.Monad (when)
-import Core (Expr (..), app, appTy, castTo, fst, lam, lamTy, pair, snd)
+import Core (Expr (..), FieldTy (..), Ty (..), app, appTy, castTo, fst, hasVar, lam, lamTy, occursIn, pair, snd, substTy)
 import Data.Foldable (foldlM)
+import qualified Data.HashMap.Strict as HashMap
+import Data.HashSet (HashSet)
+import qualified Data.HashSet as HashSet
 import Data.Word (Word16, Word32, Word64, Word8)
 import Name (Name (..))
 import qualified Syntax
-import Type (Ty (..), hasVar, occursIn, substTy)
 import Prelude hiding (fst, snd)
 
 data Actual
@@ -19,11 +23,13 @@ data Actual
 
 data Error
   = NotInScope Name
+  | TyNotInScope Name
   | NotASubtypeOf Ty Actual
   | EscapedTyVar Name
   | Occurs Int Ty
   | Can'tInfer Syntax.Expr
   | OutOfBounds Integer Ty
+  | RecordMissingField Ty String Ty
   deriving (Eq, Show)
 
 data State = State {stMetas :: Int, stFresh :: Int, stSolutions :: [(Int, Ty)]}
@@ -79,6 +85,13 @@ solve n ty = do
     Just sol ->
       error "already solved" sol
 
+zonkFieldTy :: FieldTy -> TC FieldTy
+zonkFieldTy fieldTy =
+  case fieldTy of
+    Required ty -> Required <$> zonkTy ty
+    Optional ty -> Optional <$> zonkTy ty
+    Default ty expr -> Default <$> zonkTy ty <*> zonkExpr expr
+
 zonkTy :: Ty -> TC Ty
 zonkTy ty =
   case ty of
@@ -98,6 +111,8 @@ zonkTy ty =
     TU32 -> pure ty
     TU64 -> pure ty
     TBool -> pure ty
+    TRecord fields -> TRecord <$> traverse zonkFieldTy fields
+    TOptional a -> TOptional <$> zonkTy a
 
 zonkExpr :: Expr -> TC Expr
 zonkExpr expr =
@@ -121,14 +136,46 @@ zonkExpr expr =
     Inl e -> Inl <$> zonkExpr e
     Inr e -> Inr <$> zonkExpr e
     Bool _ -> pure expr
+    Record fields -> Record <$> traverse zonkExpr fields
+    Project e field -> (`Project` field) <$> zonkExpr e
+    None -> pure expr
+    Some e -> Some <$> zonkExpr e
 
-infer :: [(Name, Ty)] -> Syntax.Expr -> TC (Expr, Ty)
-infer ctx expr =
+checkFieldTy :: HashSet Name -> Syntax.FieldTy -> TC FieldTy
+checkFieldTy tctx fieldTy =
+  case fieldTy of
+    Syntax.Optional ty -> Optional <$> checkTy tctx ty
+    Syntax.Required ty -> Required <$> checkTy tctx ty
+    Syntax.Default ty expr -> do
+      ty' <- checkTy tctx ty
+      Default ty' <$> check mempty mempty expr ty'
+
+checkTy :: HashSet Name -> Syntax.Ty -> TC Ty
+checkTy tctx ty =
+  case ty of
+    Syntax.TVar name ->
+      if HashSet.member name tctx
+        then pure $ TVar name
+        else typeError $ TyNotInScope name
+    Syntax.TArrow a b -> TArrow <$> checkTy tctx a <*> checkTy tctx b
+    Syntax.TForall name rest -> TForall name <$> checkTy (HashSet.insert name tctx) rest
+    Syntax.TExists name rest -> TExists name <$> checkTy (HashSet.insert name tctx) rest
+    Syntax.TPair a b -> TPair <$> checkTy tctx a <*> checkTy tctx b
+    Syntax.TSum a b -> TSum <$> checkTy tctx a <*> checkTy tctx b
+    Syntax.TU8 -> pure TU8
+    Syntax.TU16 -> pure TU16
+    Syntax.TU32 -> pure TU32
+    Syntax.TU64 -> pure TU64
+    Syntax.TBool -> pure TBool
+    Syntax.TRecord fields -> TRecord <$> traverse (checkFieldTy tctx) fields
+
+infer :: HashSet Name -> [(Name, Ty)] -> Syntax.Expr -> TC (Expr, Ty)
+infer tctx ctx expr =
   case expr of
     Syntax.Var (Name "elim") ->
       pure
-        ( Var $ Name "elim"
-        , TForall (Name "a") $
+        ( Var $ Name "elim",
+          TForall (Name "a") $
             TForall (Name "b") $
               TForall (Name "x") $
                 TArrow (TArrow (TVar $ Name "a") (TVar $ Name "x")) $
@@ -140,36 +187,39 @@ infer ctx expr =
         Nothing -> typeError $ NotInScope x
         Just ty -> pure (Var x, ty)
     Syntax.Ann e t -> do
-      e' <- check ctx e t
-      pure (e', t)
+      t' <- checkTy tctx t
+      e' <- check tctx ctx e t'
+      pure (e', t')
     Syntax.Lam x mTy e -> do
       inTy <- case mTy of
         Nothing -> unknown
-        Just ty -> pure ty
-      (e', eTy) <- infer ((x, inTy) : ctx) e
+        Just ty -> checkTy tctx ty
+      (e', eTy) <- infer tctx ((x, inTy) : ctx) e
       pure (Lam x inTy e', TArrow inTy eTy)
     Syntax.App f x -> do
       inTy <- unknown
       outTy <- unknown
-      f' <- check ctx f (TArrow inTy outTy)
-      x' <- check ctx x inTy
+      f' <- check tctx ctx f (TArrow inTy outTy)
+      x' <- check tctx ctx x inTy
       pure (App f' x', outTy)
     Syntax.LamTy x e -> do
-      (e', eTy) <- infer ctx e
+      (e', eTy) <- infer tctx ctx e
       pure (LamTy x e', TForall x eTy)
     Syntax.AppTy e t -> do
       name <- freshName
       ty <- unknown
-      e' <- check ctx e (TForall name ty)
-      pure (AppTy e' t, ty)
+      e' <- check tctx ctx e (TForall name ty)
+      t' <- checkTy tctx t
+      pure (AppTy e' t', ty)
     Syntax.Pack name ty e -> do
-      (e', eTy) <- infer ctx e
-      pure (Pack name ty e', TExists name eTy)
+      ty' <- checkTy tctx ty
+      (e', eTy) <- infer tctx ctx e
+      pure (Pack name ty' e', TExists name eTy)
     Syntax.Unpack (tyName, varName, v) rest -> do
       name <- freshName
       ty <- unknown
-      v' <- check ctx v (TExists name ty)
-      (rest', restTy) <- infer ((varName, ty) : ctx) rest
+      v' <- check tctx ctx v (TExists name ty)
+      (rest', restTy) <- infer tctx ((varName, ty) : ctx) rest
       escaped <-
         foldlM
           ( \acc (_, varTy) -> do
@@ -185,26 +235,26 @@ infer ctx expr =
       pure (Unpack (tyName, varName, v') rest', restTy)
     Syntax.Number _ -> typeError $ Can'tInfer expr
     Syntax.Pair a b -> do
-      (a', aTy) <- infer ctx a
-      (b', bTy) <- infer ctx b
+      (a', aTy) <- infer tctx ctx a
+      (b', bTy) <- infer tctx ctx b
       pure (Pair a' b', TPair aTy bTy)
     Syntax.Fst e -> do
       a <- unknown
       b <- unknown
-      e' <- check ctx e (TPair a b)
+      e' <- check tctx ctx e (TPair a b)
       pure (Fst e', a)
     Syntax.Snd e -> do
       a <- unknown
       b <- unknown
-      e' <- check ctx e (TPair a b)
+      e' <- check tctx ctx e (TPair a b)
       pure (Snd e', b)
     Syntax.Inl a -> do
-      (a', aTy) <- infer ctx a
+      (a', aTy) <- infer tctx ctx a
       bTy <- unknown
       pure (Inl a', TSum aTy bTy)
     Syntax.Inr b -> do
       aTy <- unknown
-      (b', bTy) <- infer ctx b
+      (b', bTy) <- infer tctx ctx b
       pure (Inr b', TSum aTy bTy)
     Syntax.Bool b -> pure (Bool b, TBool)
 
@@ -222,12 +272,11 @@ subtypeOf ctx (expr, a) b = do
   b' <- walk b
   subtypeOf' ctx (expr, a') b'
 
-{- | @a `subtypeOf` b@ means that values of type @a@
- can be used when values of type @b@ are required.
--}
+-- | @a `subtypeOf` b@ means that values of type @a@
+-- can be used when values of type @b@ are required.
 subtypeOf' :: [(Name, Ty)] -> (Expr, Ty) -> Ty -> TC Expr
 -- infer generalisation for lambda abstractions
-subtypeOf' ctx (expr@Lam{}, a) (TForall x t) = do
+subtypeOf' ctx (expr@Lam {}, a) (TForall x t) = do
   -- When is an arbitrary @a@ a subtype of @forall x. t@?
   --
   -- When @a@ is a subtype of @t@ (generalisation)
@@ -345,9 +394,51 @@ subtypeOf' ctx (expr, a) b =
         TBool -> pure expr
         TUnknown u -> expr <$ solve u a
         _ -> typeError $ NotASubtypeOf a (Ty b)
+    TRecord fields ->
+      case b of
+        TRecord fields' -> do
+          let getFieldTy =
+                \case
+                  Required ty -> ty
+                  Optional ty -> TOptional ty
+                  Default ty _ -> ty
 
-check :: [(Name, Ty)] -> Syntax.Expr -> Ty -> TC Expr
-check _ expr@(Syntax.Number n) ty = do
+          fields'' <-
+            HashMap.traverseWithKey
+              ( \name fieldTy' ->
+                  case fieldTy' of
+                    Required ty' -> do
+                      ty <-
+                        maybe
+                          (typeError $ RecordMissingField a name ty')
+                          (pure . getFieldTy)
+                          (HashMap.lookup name fields)
+                      subtypeOf ctx (Project expr name, ty) ty'
+                    Optional ty' ->
+                      case HashMap.lookup name fields of
+                        Nothing ->
+                          pure None
+                        Just (getFieldTy -> ty) ->
+                          Some <$> subtypeOf ctx (Project expr name, ty) ty'
+                    Default ty' expr ->
+                      case HashMap.lookup name fields of
+                        Nothing ->
+                          pure expr
+                        Just (getFieldTy -> ty) ->
+                          subtypeOf ctx (Project expr name, ty) ty'
+              )
+              fields'
+          pure $ Record fields''
+        TUnknown u -> expr <$ solve u a
+        _ -> typeError $ NotASubtypeOf a (Ty b)
+    TOptional x ->
+      case b of
+        TOptional y -> _ x y
+        TUnknown u -> expr <$ solve u a
+        _ -> typeError $ NotASubtypeOf a (Ty b)
+
+check :: HashSet Name -> [(Name, Ty)] -> Syntax.Expr -> Ty -> TC Expr
+check _ _ expr@(Syntax.Number n) ty = do
   ty' <- zonkTy ty
   case ty' of
     TU8 ->
@@ -360,6 +451,6 @@ check _ expr@(Syntax.Number n) ty = do
       maybe (typeError $ OutOfBounds n TU64) (pure . U64) (castTo @Word64 n)
     TUnknown _ -> typeError $ Can'tInfer expr
     _ -> typeError $ NotASubtypeOf ty Number
-check ctx expr ty = do
-  (expr', ty') <- infer ctx expr
+check tctx ctx expr ty = do
+  (expr', ty') <- infer tctx ctx expr
   subtypeOf ctx (expr', ty') ty

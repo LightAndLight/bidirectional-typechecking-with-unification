@@ -1,7 +1,28 @@
 module Syntax where
 
+import Data.HashMap.Strict (HashMap)
 import Name (Name (..))
-import Type (Ty (..))
+
+data FieldTy
+  = Optional Ty
+  | Default Ty Expr
+  | Required Ty
+  deriving (Eq, Show)
+
+data Ty
+  = TVar Name
+  | TArrow Ty Ty
+  | TForall Name Ty
+  | TExists Name Ty
+  | TPair Ty Ty
+  | TSum Ty Ty
+  | TU8
+  | TU16
+  | TU32
+  | TU64
+  | TBool
+  | TRecord (HashMap String FieldTy)
+  deriving (Eq, Show)
 
 data Expr
   = Var Name

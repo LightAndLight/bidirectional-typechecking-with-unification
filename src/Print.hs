@@ -1,11 +1,19 @@
 module Print where
 
-import Core (Expr (..))
+import Core (Expr (..), FieldTy (..), Ty (..))
+import qualified Data.HashMap.Strict as HashMap
+import Data.List (intercalate)
 import Name (showName)
-import Type (Ty (..))
 
 parens :: String -> String
 parens a = "(" <> a <> ")"
+
+showFieldTy :: String -> FieldTy -> String
+showFieldTy name fieldTy =
+  case fieldTy of
+    Required ty -> name <> " : " <> showTy ty
+    Optional ty -> name <> "? : " <> showTy ty
+    Default ty expr -> name <> " : " <> showTy ty <> " = " <> showExpr expr
 
 showTy :: Ty -> String
 showTy ty =
@@ -33,11 +41,11 @@ showTy ty =
         (showTy a)
         <> " * "
         <> ( case b of
-              TPair _ _ -> parens
-              TForall _ _ -> parens
-              TExists _ _ -> parens
-              TSum _ _ -> parens
-              _ -> id
+               TPair _ _ -> parens
+               TForall _ _ -> parens
+               TExists _ _ -> parens
+               TSum _ _ -> parens
+               _ -> id
            )
           (showTy b)
     TSum a b ->
@@ -49,10 +57,10 @@ showTy ty =
         (showTy a)
         <> " + "
         <> ( case b of
-              TSum _ _ -> parens
-              TForall _ _ -> parens
-              TExists _ _ -> parens
-              _ -> id
+               TSum _ _ -> parens
+               TForall _ _ -> parens
+               TExists _ _ -> parens
+               _ -> id
            )
           (showTy b)
     TU8 -> "u8"
@@ -60,6 +68,11 @@ showTy ty =
     TU32 -> "u32"
     TU64 -> "u64"
     TBool -> "bool"
+    TRecord fields ->
+      if HashMap.null fields
+        then "{}"
+        else "{ " <> intercalate ", " (uncurry showFieldTy <$> HashMap.toList fields) <> " }"
+    TOptional a -> "Optional " <> showTy a
 
 showExpr :: Expr -> String
 showExpr expr =
@@ -85,14 +98,14 @@ showExpr expr =
         (showExpr f)
         <> " "
         <> ( case x of
-              Lam _ _ _ -> parens
-              LamTy _ _ -> parens
-              App _ _ -> parens
-              Fst _ -> parens
-              Snd _ -> parens
-              Inl _ -> parens
-              Inr _ -> parens
-              _ -> id
+               Lam _ _ _ -> parens
+               LamTy _ _ -> parens
+               App _ _ -> parens
+               Fst _ -> parens
+               Snd _ -> parens
+               Inl _ -> parens
+               Inr _ -> parens
+               _ -> id
            )
           (showExpr x)
     LamTy x e ->
@@ -106,15 +119,17 @@ showExpr expr =
         (showExpr e)
         <> " @"
         <> ( case t of
-              TArrow _ _ -> parens
-              TForall _ _ -> parens
-              TExists _ _ -> parens
-              TSum _ _ -> parens
-              _ -> id
+               TArrow _ _ -> parens
+               TForall _ _ -> parens
+               TExists _ _ -> parens
+               TSum _ _ -> parens
+               _ -> id
            )
           (showTy t)
     Pack x ty e ->
-      "exists " <> showName x <> ". ("
+      "exists "
+        <> showName x
+        <> ". ("
         <> showTy ty
         <> ", "
         <> showExpr e
@@ -157,3 +172,20 @@ showExpr expr =
         <> ")"
     Bool b ->
       if b then "true" else "false"
+    Record fields ->
+      if HashMap.null fields
+        then "{}"
+        else "{ " <> intercalate ", " ((\(name, value) -> name <> " = " <> showExpr value) <$> HashMap.toList fields) <> " }"
+    Project a field ->
+      ( case a of
+          App _ _ -> parens
+          AppTy _ _ -> parens
+          Lam _ _ _ -> parens
+          LamTy _ _ -> parens
+          _ -> id
+      )
+        (showExpr a)
+        <> "."
+        <> field
+    None -> "None"
+    Some a -> "Some(" <> showExpr a <> ")"

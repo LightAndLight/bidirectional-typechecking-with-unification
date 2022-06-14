@@ -7,11 +7,10 @@ import Control.Applicative (many, optional, (<|>))
 import Data.Char (isAlpha, isAlphaNum)
 import Name (Name (..))
 import Streaming.Chars (Chars)
-import Syntax (Expr (..))
+import Syntax (Expr (..), Ty (..))
 import Text.Parser.Char (char, satisfy, string)
 import Text.Parser.Token (decimal, parens, symbol, symbolic, token)
 import Text.Sage (Parser)
-import Type (Ty (..))
 
 name :: Chars s => Parser s Name
 name = token $ Name <$> ((:) <$> satisfy isAlpha <*> many (satisfy isAlphaNum))
