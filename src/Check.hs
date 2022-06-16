@@ -7,11 +7,14 @@ module Check where
 
 import Control.Monad (when)
 import Core
-  ( Expr (..),
+  ( Branch (..),
+    Expr (..),
     FieldTy (..),
+    Pattern (..),
     Ty (..),
     app,
     appTy,
+    boundVars,
     castTo,
     fst,
     hasVar,
@@ -26,6 +29,7 @@ import Data.Foldable (foldlM)
 import qualified Data.HashMap.Strict as HashMap
 import Data.HashSet (HashSet)
 import qualified Data.HashSet as HashSet
+import Data.Traversable (for)
 import Data.Word (Word16, Word32, Word64, Word8)
 import Name (Name (..))
 import qualified Syntax
@@ -130,6 +134,15 @@ zonkTy ty =
     TRecord fields -> TRecord <$> traverse zonkFieldTy fields
     TOptional a -> TOptional <$> zonkTy a
 
+zonkPattern :: Pattern -> TC Pattern
+zonkPattern pat =
+  case pat of
+    Ctor name args -> Ctor name <$> (traverse . traverse) zonkTy args
+
+zonkBranch :: Branch -> TC Branch
+zonkBranch (Branch pat body) =
+  Branch <$> zonkPattern pat <*> zonkExpr body
+
 zonkExpr :: Expr -> TC Expr
 zonkExpr expr =
   case expr of
@@ -156,6 +169,8 @@ zonkExpr expr =
     Project e field -> (`Project` field) <$> zonkExpr e
     None -> pure expr
     Some e -> Some <$> zonkExpr e
+    Case e bs ->
+      Case <$> zonkExpr e <*> traverse zonkBranch bs
 
 checkFieldTy :: HashSet Name -> Syntax.FieldTy -> TC FieldTy
 checkFieldTy tctx fieldTy =
@@ -184,6 +199,15 @@ checkTy tctx ty =
     Syntax.TU64 -> pure TU64
     Syntax.TBool -> pure TBool
     Syntax.TRecord fields -> TRecord <$> traverse (checkFieldTy tctx) fields
+
+checkPattern :: HashSet Name -> [(Name, Ty)] -> Syntax.Pattern -> Ty -> TC Pattern
+checkPattern tctx ctx pat expected = do
+  (pat', actual) <- inferPattern tctx ctx pat
+  expr' <- subtypeOf ctx (_, expected) actual
+  pure pat'
+
+inferPattern :: HashSet Name -> [(Name, Ty)] -> Syntax.Pattern -> TC (Pattern, Ty)
+inferPattern tctx ctx pat = _
 
 infer :: HashSet Name -> [(Name, Ty)] -> Syntax.Expr -> TC (Expr, Ty)
 infer tctx ctx expr =
@@ -294,6 +318,14 @@ infer tctx ctx expr =
         ( Record $ Prelude.fst <$> fields',
           TRecord $ Required . Prelude.snd <$> fields'
         )
+    Syntax.Case e bs -> do
+      (e', eTy) <- infer tctx ctx e
+      outTy <- unknown
+      bs' <- for bs $ \(Syntax.Branch pat body) -> do
+        pat' <- checkPattern tctx ctx pat eTy
+        body' <- check tctx (boundVars pat' <> ctx) body outTy
+        pure $ Branch pat' body'
+      pure (Case e' bs', outTy)
 
 walk :: Ty -> TC Ty
 walk ty@(TUnknown u) = do

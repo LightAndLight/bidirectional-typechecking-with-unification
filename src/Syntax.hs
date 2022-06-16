@@ -24,6 +24,12 @@ data Ty
   | TRecord (HashMap String FieldTy)
   deriving (Eq, Show)
 
+data Pattern = Ctor String [Name]
+  deriving (Eq, Show)
+
+data Branch = Branch Pattern Expr
+  deriving (Eq, Show)
+
 data Expr
   = Var Name
   | Ann Expr Ty
@@ -43,6 +49,7 @@ data Expr
   | None
   | Some Expr
   | Record (HashMap String Expr)
+  | Case Expr [Branch]
   deriving (Eq, Show)
 
 elim :: Expr -> Expr -> Expr -> Expr

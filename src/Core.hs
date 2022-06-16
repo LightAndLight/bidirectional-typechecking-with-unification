@@ -55,6 +55,16 @@ substTy arg@(name, newTy) ty =
     TRecord fields -> TRecord $ substFieldTy arg <$> fields
     TOptional a -> TOptional (substTy arg a)
 
+patternHasTyVar :: Name -> Pattern -> Bool
+patternHasTyVar name pat =
+  case pat of
+    Ctor _ args -> any (hasVar name . Prelude.snd) args
+
+branchHasTyVar :: Name -> Branch -> Bool
+branchHasTyVar name (Branch pat body) =
+  patternHasTyVar name pat
+    || exprHasTyVar name body
+
 exprHasTyVar :: Name -> Expr -> Bool
 exprHasTyVar name expr =
   case expr of
@@ -91,6 +101,7 @@ exprHasTyVar name expr =
     Project a _ -> exprHasTyVar name a
     None -> False
     Some a -> exprHasTyVar name a
+    Case e bs -> exprHasTyVar name e || any (branchHasTyVar name) bs
 
 fieldTyHasVar :: Name -> FieldTy -> Bool
 fieldTyHasVar name fieldTy =
@@ -116,6 +127,17 @@ hasVar name ty =
     TBool -> False
     TRecord fields -> any (fieldTyHasVar name) fields
     TOptional a -> hasVar name a
+
+occursInPattern :: Int -> Pattern -> Bool
+occursInPattern meta pat =
+  case pat of
+    Ctor _ args ->
+      any (occursIn meta . Prelude.snd) args
+
+occursInBranch :: Int -> Branch -> Bool
+occursInBranch meta (Branch pat body) =
+  occursInPattern meta pat
+    || occursInExpr meta body
 
 occursInExpr :: Int -> Expr -> Bool
 occursInExpr meta expr =
@@ -145,6 +167,7 @@ occursInExpr meta expr =
     Project a _ -> occursInExpr meta a
     None -> False
     Some a -> occursInExpr meta a
+    Case e bs -> occursInExpr meta e || any (occursInBranch meta) bs
 
 occursInFieldTy :: Int -> FieldTy -> Bool
 occursInFieldTy meta fieldTy =
@@ -171,6 +194,15 @@ occursIn meta ty =
     TRecord fields -> any (occursInFieldTy meta) fields
     TOptional a -> occursIn meta a
 
+data Pattern = Ctor String [(Name, Ty)]
+  deriving (Eq, Show)
+
+boundVars :: Pattern -> [(Name, Ty)]
+boundVars (Ctor _ args) = args
+
+data Branch = Branch Pattern Expr
+  deriving (Eq, Show)
+
 data Expr
   = Var Name
   | Ann Expr Ty
@@ -194,7 +226,14 @@ data Expr
   | Project Expr String
   | None
   | Some Expr
+  | Case Expr [Branch]
   deriving (Eq, Show)
+
+substExprBranch :: (Name, Expr) -> Branch -> Branch
+substExprBranch arg@(name, _) branch@(Branch pat body) =
+  if name `elem` fmap Prelude.fst (boundVars pat)
+    then branch
+    else Branch pat (substExpr arg body)
 
 substExpr :: (Name, Expr) -> Expr -> Expr
 substExpr arg@(name, newExpr) expr =
@@ -226,6 +265,8 @@ substExpr arg@(name, newExpr) expr =
     Project a field -> Project (substExpr arg a) field
     None -> expr
     Some a -> Some (substExpr arg a)
+    Case e bs ->
+      Case (substExpr arg e) (substExprBranch arg <$> bs)
 
 app :: Expr -> Expr -> Expr
 app (Lam name _ body) x = substExpr (name, x) body
@@ -252,6 +293,15 @@ snd b = Snd b
 pair :: Expr -> Expr -> Expr
 pair (Fst a) (Snd a') | a == a' = a
 pair a b = Pair a b
+
+substTyPattern :: (Name, Ty) -> Pattern -> Pattern
+substTyPattern arg pat =
+  case pat of
+    Ctor name args -> Ctor name (fmap (substTy arg) <$> args)
+
+substTyBranch :: (Name, Ty) -> Branch -> Branch
+substTyBranch arg (Branch pat body) =
+  Branch (substTyPattern arg pat) (substTyExpr arg body)
 
 substTyExpr :: (Name, Ty) -> Expr -> Expr
 substTyExpr arg@(name, _) expr =
@@ -286,6 +336,8 @@ substTyExpr arg@(name, _) expr =
     Project a field -> Project (substTyExpr arg a) field
     None -> expr
     Some a -> Some (substTyExpr arg a)
+    Case e bs ->
+      Case (substTyExpr arg e) (substTyBranch arg <$> bs)
 
 appTy :: Expr -> Ty -> Expr
 appTy (LamTy name body) t = substTyExpr (name, t) body
