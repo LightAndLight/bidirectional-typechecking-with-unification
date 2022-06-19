@@ -200,14 +200,46 @@ checkTy tctx ty =
     Syntax.TBool -> pure TBool
     Syntax.TRecord fields -> TRecord <$> traverse (checkFieldTy tctx) fields
 
-checkPattern :: HashSet Name -> [(Name, Ty)] -> Syntax.Pattern -> Ty -> TC Pattern
-checkPattern tctx ctx pat expected = do
-  (pat', actual) <- inferPattern tctx ctx pat
-  expr' <- subtypeOf ctx (_, expected) actual
-  pure pat'
-
 inferPattern :: HashSet Name -> [(Name, Ty)] -> Syntax.Pattern -> TC (Pattern, Ty)
 inferPattern tctx ctx pat = _
+
+intersection :: Ty -> Ty -> TC Ty
+intersection a b = do
+  a' <- walk a
+  b' <- walk b
+  case (a', b') of
+    (TUnknown m, _) -> b' <$ solve m b'
+    (_, TUnknown m) -> a' <$ solve m a'
+    {-
+    (TU8, TU16) -> pure TU8
+    (TU8, TU32) -> pure TU32
+    (TU8, TU64) -> pure TU8
+    (TU16, TU32) -> pure TU16
+    (TU16, TU64) -> pure TU16
+    (TU32, TU64) -> pure TU32
+    (TArrow x y, TArrow x' y') -> TArrow <$> union x x' <*> intersection y y'
+    -}
+    (_, _) | a' == b' -> pure a'
+    _ -> typeError $ NotASubtypeOf a' (Ty b')
+
+union :: Ty -> Ty -> TC Ty
+union a b = do
+  a' <- walk a
+  b' <- walk b
+  case (a', b') of
+    (TUnknown m, _) -> b' <$ solve m b'
+    (_, TUnknown m) -> a' <$ solve m a'
+    {-
+    (TU8, TU16) -> pure TU16
+    (TU8, TU32) -> pure TU32
+    (TU8, TU64) -> pure TU64
+    (TU16, TU32) -> pure TU32
+    (TU16, TU64) -> pure TU64
+    (TU32, TU64) -> pure TU64
+    (TArrow x y, TArrow x' y') -> TArrow <$> intersection x x' <*> union y y'
+    -}
+    (_, _) | a' == b' -> pure a'
+    _ -> typeError $ NotASubtypeOf a' (Ty b')
 
 infer :: HashSet Name -> [(Name, Ty)] -> Syntax.Expr -> TC (Expr, Ty)
 infer tctx ctx expr =
@@ -322,10 +354,20 @@ infer tctx ctx expr =
       (e', eTy) <- infer tctx ctx e
       outTy <- unknown
       bs' <- for bs $ \(Syntax.Branch pat body) -> do
-        pat' <- checkPattern tctx ctx pat eTy
-        body' <- check tctx (boundVars pat' <> ctx) body outTy
-        pure $ Branch pat' body'
-      pure (Case e' bs', outTy)
+        (pat', patTy) <- inferPattern tctx ctx pat
+        pure (pat', patTy, boundVars pat', body)
+      patTy' <- do
+        initial <- unknown
+        foldlM (\acc (_, patTy, _, _) -> union acc patTy) initial bs'
+      e'' <- subtypeOf ctx (e', eTy) patTy'
+      bs'' <-
+        traverse
+          ( \(pat', _, patVars, body) ->
+              Branch pat'
+                <$> check tctx (patVars <> ctx) body outTy
+          )
+          bs'
+      pure (Case e'' bs'', outTy)
 
 walk :: Ty -> TC Ty
 walk ty@(TUnknown u) = do
