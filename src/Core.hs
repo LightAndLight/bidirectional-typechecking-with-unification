@@ -58,7 +58,9 @@ substTy arg@(name, newTy) ty =
 patternHasTyVar :: Name -> Pattern -> Bool
 patternHasTyVar name pat =
   case pat of
-    Ctor _ args -> any (hasVar name . Prelude.snd) args
+    PCtor _ args -> any (hasVar name . Prelude.snd) args
+    PTrue -> False
+    PFalse -> False
 
 branchHasTyVar :: Name -> Branch -> Bool
 branchHasTyVar name (Branch pat body) =
@@ -131,8 +133,10 @@ hasVar name ty =
 occursInPattern :: Int -> Pattern -> Bool
 occursInPattern meta pat =
   case pat of
-    Ctor _ args ->
+    PCtor _ args ->
       any (occursIn meta . Prelude.snd) args
+    PTrue -> False
+    PFalse -> False
 
 occursInBranch :: Int -> Branch -> Bool
 occursInBranch meta (Branch pat body) =
@@ -194,11 +198,18 @@ occursIn meta ty =
     TRecord fields -> any (occursInFieldTy meta) fields
     TOptional a -> occursIn meta a
 
-data Pattern = Ctor String [(Name, Ty)]
+data Pattern
+  = PCtor String [(Name, Ty)]
+  | PTrue
+  | PFalse
   deriving (Eq, Show)
 
 boundVars :: Pattern -> [(Name, Ty)]
-boundVars (Ctor _ args) = args
+boundVars pat =
+  case pat of
+    PCtor _ args -> args
+    PTrue -> []
+    PFalse -> []
 
 data Branch = Branch Pattern Expr
   deriving (Eq, Show)
@@ -297,7 +308,9 @@ pair a b = Pair a b
 substTyPattern :: (Name, Ty) -> Pattern -> Pattern
 substTyPattern arg pat =
   case pat of
-    Ctor name args -> Ctor name (fmap (substTy arg) <$> args)
+    PCtor name args -> PCtor name (fmap (substTy arg) <$> args)
+    PTrue -> PTrue
+    PFalse -> PFalse
 
 substTyBranch :: (Name, Ty) -> Branch -> Branch
 substTyBranch arg (Branch pat body) =

@@ -8,10 +8,10 @@ import Data.Char (isAlpha, isAlphaNum)
 import qualified Data.HashMap.Strict as HashMap
 import Name (Name (..))
 import Streaming.Chars (Chars)
-import Syntax (Expr (..), FieldTy (..), Ty (..))
+import Syntax (Branch (..), Expr (..), FieldTy (..), Pattern (..), Ty (..))
 import Text.Parser.Char (char, satisfy, string)
 import Text.Parser.Combinators (sepBy)
-import Text.Parser.Token (braces, comma, decimal, parens, symbol, symbolic, token)
+import Text.Parser.Token (braces, comma, decimal, parens, semi, symbol, symbolic, token)
 import Text.Sage (Parser)
 
 ident :: Chars s => Parser s String
@@ -57,6 +57,18 @@ appExpr =
   foldl mkApp <$> simpleExpr <*> many simpleExpr
     <|> foldl AppTy <$> simpleExpr <*> many simpleType
 
+pattern :: Chars s => Parser s Pattern
+pattern =
+  PTrue <$ symbol "true"
+    <|> PFalse <$ symbol "false"
+
+branch :: Chars s => Parser s Branch
+branch =
+  Branch
+    <$> pattern
+    <* symbol "->"
+    <*> expr
+
 expr :: forall s. Chars s => Parser s Expr
 expr =
   -- \x -> rest
@@ -89,6 +101,11 @@ expr =
       <*> ((,,) <$> name <* symbolic '.' <*> name <* symbolic '=' <*> expr)
       <* symbol "in"
       <*> expr
+    <|> Case
+      <$ symbol "case"
+      <*> expr
+      <* symbol "of"
+      <*> braces (branch `sepBy` semi)
     <|>
     -- e
     -- e : ty

@@ -1,94 +1,170 @@
 module Print where
 
-import Core (Expr (..), FieldTy (..), Ty (..))
+import Core (Branch, Expr (..), FieldTy (..), Ty (..))
+import Data.Function ((&))
 import qualified Data.HashMap.Strict as HashMap
 import Data.List (intercalate)
+import Lens.Micro (mapped, (<>~), _last)
 import Name (showName)
 
-parens :: String -> String
-parens a = "(" <> a <> ")"
+parens :: [String] -> [String]
+parens a =
+  case a of
+    [] -> ["()"]
+    [a'] -> ["(" <> a' <> ")"]
+    _ ->
+      ["("] <> a <> [")"]
 
-showFieldTy :: String -> FieldTy -> String
+oneLine :: [String] -> Maybe String
+oneLine [] = Nothing
+oneLine [x] = Just x
+oneLine (_ : _ : _) = Nothing
+
+indent :: Int -> [String] -> [String]
+indent n as = (replicate n ' ' <>) <$> as
+
+showFieldTy :: String -> FieldTy -> [String]
 showFieldTy name fieldTy =
   case fieldTy of
-    Required ty -> name <> " : " <> showTy ty
-    Optional ty -> name <> "? : " <> showTy ty
-    Default ty expr -> name <> " : " <> showTy ty <> " = " <> showExpr expr
+    Required ty ->
+      let ty' = showTy ty
+          field = name <> " :"
+       in case oneLine ty' of
+            Nothing -> field : indent 2 ty'
+            Just ty'' -> [field <> " " <> ty'']
+    Optional ty ->
+      let ty' = showTy ty
+          field = name <> "? :"
+       in case oneLine ty' of
+            Nothing -> field : indent 2 ty'
+            Just ty'' -> [field <> " " <> ty'']
+    Default ty expr ->
+      let ty' = showTy ty
+          expr' = showExpr expr
+          field = name <> " :"
+          fieldAndTy = case oneLine ty' of
+            Nothing -> field : ty'
+            Just ty'' -> [field <> " " <> ty'']
+       in case oneLine expr' of
+            Nothing -> (fieldAndTy & _last <>~ " =") <> indent 2 expr'
+            Just expr'' -> fieldAndTy & _last <>~ (" = " <> expr'')
 
-showTy :: Ty -> String
+showTy :: Ty -> [String]
 showTy ty =
   case ty of
-    TVar n -> showName n
-    TUnknown n -> "?" <> show n
+    TVar n -> [showName n]
+    TUnknown n -> ["?" <> show n]
     TArrow a b ->
-      ( case a of
-          TArrow _ _ -> parens
-          TForall _ _ -> parens
-          _ -> id
-      )
-        (showTy a)
-        <> " -> "
-        <> showTy b
-    TForall x t -> "forall " <> showName x <> ". " <> showTy t
-    TExists x t -> "exists " <> showName x <> ". " <> showTy t
+      let a' =
+            ( case a of
+                TArrow _ _ -> parens
+                TForall _ _ -> parens
+                _ -> id
+            )
+              (showTy a)
+       in (a' & _last <>~ "->")
+            <> showTy b
+    TForall x t ->
+      let t' = showTy t
+          q = ["forall " <> showName x <> "."]
+       in case oneLine t' of
+            Nothing -> q <> t'
+            Just t'' -> q & _last <>~ (" " <> t'')
+    TExists x t ->
+      let t' = showTy t
+          q = ["exists " <> showName x <> "."]
+       in case oneLine t' of
+            Nothing -> q <> t'
+            Just t'' -> q & _last <>~ (" " <> t'')
     TPair a b ->
-      ( case a of
-          TForall _ _ -> parens
-          TExists _ _ -> parens
-          TSum _ _ -> parens
-          _ -> id
-      )
-        (showTy a)
-        <> " * "
-        <> ( case b of
-               TPair _ _ -> parens
-               TForall _ _ -> parens
-               TExists _ _ -> parens
-               TSum _ _ -> parens
-               _ -> id
-           )
-          (showTy b)
+      let a' =
+            ( case a of
+                TForall _ _ -> parens
+                TExists _ _ -> parens
+                TSum _ _ -> parens
+                _ -> id
+            )
+              (showTy a)
+          b' =
+            ( case b of
+                TPair _ _ -> parens
+                TForall _ _ -> parens
+                TExists _ _ -> parens
+                TSum _ _ -> parens
+                _ -> id
+            )
+              (showTy b)
+          a'' = (a' & _last <>~ " *")
+       in case oneLine b' of
+            Nothing -> a'' <> b'
+            Just b'' -> a'' & _last <>~ b''
     TSum a b ->
-      ( case a of
-          TForall _ _ -> parens
-          TExists _ _ -> parens
-          _ -> id
-      )
-        (showTy a)
-        <> " + "
-        <> ( case b of
-               TSum _ _ -> parens
-               TForall _ _ -> parens
-               TExists _ _ -> parens
-               _ -> id
-           )
-          (showTy b)
-    TU8 -> "u8"
-    TU16 -> "u16"
-    TU32 -> "u32"
-    TU64 -> "u64"
-    TBool -> "bool"
+      let a' =
+            ( case a of
+                TForall _ _ -> parens
+                TExists _ _ -> parens
+                _ -> id
+            )
+              (showTy a)
+          b' =
+            ( case b of
+                TSum _ _ -> parens
+                TForall _ _ -> parens
+                TExists _ _ -> parens
+                _ -> id
+            )
+              (showTy b)
+          a'' = (a' & _last <>~ " +")
+       in case oneLine b' of
+            Nothing -> a'' <> b'
+            Just b'' -> a'' & _last <>~ b''
+    TU8 -> ["u8"]
+    TU16 -> ["u16"]
+    TU32 -> ["u32"]
+    TU64 -> ["u64"]
+    TBool -> ["bool"]
     TRecord fields ->
       if HashMap.null fields
-        then "{}"
-        else "{ " <> intercalate ", " (uncurry showFieldTy <$> HashMap.toList fields) <> " }"
-    TOptional a -> "Optional " <> showTy a
+        then ["{}"]
+        else
+          let fields' :: [[String]]
+              fields' = uncurry showFieldTy <$> HashMap.toList fields
+           in case traverse oneLine fields' of
+                Nothing -> ["{"] <> concat (fields' & mapped . _last <>~ ",") <> ["}"]
+                Just fields'' -> ["{ " <> intercalate ", " fields'' <> " }"]
+    TOptional a ->
+      let a' = showTy a
+       in case oneLine a' of
+            Nothing -> ["Optional"] <> indent 2 a'
+            Just a'' -> ["Optional " <> a'']
 
-showExpr :: Expr -> String
+showBranch :: Branch -> [String]
+showBranch = _
+
+showExpr :: Expr -> [String]
 showExpr expr =
   case expr of
-    Var n -> showName n
+    Var n -> [showName n]
     Ann e ty ->
-      ( case e of
-          Lam _ _ _ -> parens
-          LamTy _ _ -> parens
-          _ -> id
-      )
-        (showExpr e)
-        <> " : "
-        <> showTy ty
+      [ ( case e of
+            Lam _ _ _ -> parens
+            LamTy _ _ -> parens
+            _ -> id
+        )
+          (showExpr e)
+          <> " : "
+          <> showTy ty
+      ]
     Lam x ty e ->
-      "\\(" <> showName x <> " : " <> showTy ty <> ") -> " <> showExpr e
+      let e' = showExpr e
+          lam = "\\(" <> showName x <> " : " <> showTy ty <> ") ->"
+       in case e' of
+            [] -> undefined
+            [e''] ->
+              [lam <> " " <> e']
+            _ ->
+              ["\\(" <> showName x <> " : " <> showTy ty <> ") ->"]
+                <> e'
     App f x ->
       ( case f of
           Lam _ _ _ -> parens
@@ -189,3 +265,8 @@ showExpr expr =
         <> field
     None -> "None"
     Some a -> "Some(" <> showExpr a <> ")"
+    Case a bs ->
+      ["case " <> showExpr a <> " of {"]
+        <> (fmap ("  " <>) . showBranch)
+        =<< bs
+          <> ["}"]

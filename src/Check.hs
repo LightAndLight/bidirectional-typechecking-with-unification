@@ -137,7 +137,9 @@ zonkTy ty =
 zonkPattern :: Pattern -> TC Pattern
 zonkPattern pat =
   case pat of
-    Ctor name args -> Ctor name <$> (traverse . traverse) zonkTy args
+    PCtor name args -> PCtor name <$> (traverse . traverse) zonkTy args
+    PTrue -> pure PTrue
+    PFalse -> pure PFalse
 
 zonkBranch :: Branch -> TC Branch
 zonkBranch (Branch pat body) =
@@ -200,8 +202,15 @@ checkTy tctx ty =
     Syntax.TBool -> pure TBool
     Syntax.TRecord fields -> TRecord <$> traverse (checkFieldTy tctx) fields
 
-inferPattern :: HashSet Name -> [(Name, Ty)] -> Syntax.Pattern -> TC (Pattern, Ty)
-inferPattern tctx ctx pat = _
+inferPattern :: Syntax.Pattern -> TC (Pattern, Ty)
+inferPattern pat =
+  case pat of
+    Syntax.PCtor name args ->
+      error "TODO" name args
+    Syntax.PTrue ->
+      pure (PTrue, TBool)
+    Syntax.PFalse ->
+      pure (PFalse, TBool)
 
 intersection :: Ty -> Ty -> TC Ty
 intersection a b = do
@@ -354,17 +363,17 @@ infer tctx ctx expr =
       (e', eTy) <- infer tctx ctx e
       outTy <- unknown
       bs' <- for bs $ \(Syntax.Branch pat body) -> do
-        (pat', patTy) <- inferPattern tctx ctx pat
-        pure (pat', patTy, boundVars pat', body)
+        (pat', patTy) <- inferPattern pat
+        pure (pat', patTy, body)
       patTy' <- do
         initial <- unknown
-        foldlM (\acc (_, patTy, _, _) -> union acc patTy) initial bs'
+        foldlM (\acc (_, patTy, _) -> union acc patTy) initial bs'
       e'' <- subtypeOf ctx (e', eTy) patTy'
       bs'' <-
         traverse
-          ( \(pat', _, patVars, body) ->
+          ( \(pat', _, body) ->
               Branch pat'
-                <$> check tctx (patVars <> ctx) body outTy
+                <$> check tctx (boundVars pat' <> ctx) body outTy
           )
           bs'
       pure (Case e'' bs'', outTy)

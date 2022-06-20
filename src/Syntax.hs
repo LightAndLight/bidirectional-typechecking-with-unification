@@ -24,7 +24,10 @@ data Ty
   | TRecord (HashMap String FieldTy)
   deriving (Eq, Show)
 
-data Pattern = Ctor String [Name]
+data Pattern
+  = PCtor String [Name]
+  | PTrue
+  | PFalse
   deriving (Eq, Show)
 
 data Branch = Branch Pattern Expr
